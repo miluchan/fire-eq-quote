@@ -1,1 +1,21 @@
-
+{
+  "setupTasks": [
+    { "name": "安裝套件", "command": "npm install" }
+  ],
+  "tasks": {
+    "start": {
+      "name": "啟動報價系統",
+      "command": "npm start",
+      "runAtStart": true,
+      "preview": { "port": 3000 }
+    },
+    "db-init": {
+      "name": "初始化 Neon 資料庫",
+      "command": "npm run db:init"
+    },
+    "test": {
+      "name": "保費計算測試",
+      "command": "npm test"
+    }
+  }
+}
