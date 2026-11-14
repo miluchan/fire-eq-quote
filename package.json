@@ -1,17 +1,16 @@
 {
   "name": "fire-eq-quote",
-  "version": "1.0.0",
-  "description": "住宅火災及地震基本保險 報價系統（CodeSandbox + Neon PostgreSQL）",
-  "main": "server.js",
+  "version": "2.0.0",
+  "description": "住宅火災及地震基本保險 報價系統（Vercel + Neon PostgreSQL）",
+  "private": true,
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js",
+    "dev": "node server.js",
     "db:init": "node scripts/db-init.js",
-    "db:seed-sql": "node scripts/gen-seed.js",
+    "db:sql": "node src/seed.js",
     "test": "node --test test/premium.test.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": "22.x"
   },
   "dependencies": {
     "pg": "^8.13.0"

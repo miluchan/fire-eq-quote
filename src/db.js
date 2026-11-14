@@ -1,27 +1,38 @@
 /**
  * 資料存取層
- * - 有 DATABASE_URL：連 Neon PostgreSQL
- * - 沒有：記憶體模式（用 refdata.js，報價存在記憶體，重啟即消失），方便先看畫面
+ * - 有 DATABASE_URL（Vercel × Neon 整合會自動注入）：連 Neon PostgreSQL
+ * - 沒有：記憶體模式（用 refdata.js，資料不會保存），只供本機先看畫面
  */
 const R = require('./refdata');
 
 let pool = null;
 const mem = { quotes: new Map(), seq: new Map() };
 
+function dbUrl() {
+  return process.env.DATABASE_URL || process.env.POSTGRES_URL || '';
+}
+
 function usingDb() {
-  return Boolean(process.env.DATABASE_URL);
+  return Boolean(dbUrl());
 }
 
 function getPool() {
   if (!pool) {
     const { Pool } = require('pg');
+    const url = dbUrl();
     pool = new Pool({
-      connectionString: process.env.DATABASE_URL,
-      ssl: { rejectUnauthorized: false },
-      max: 5,
+      connectionString: url,
+      ssl: /sslmode=/.test(url) ? undefined : { rejectUnauthorized: true },
+      max: 3, // Serverless：每個函式實例只開少量連線（走 Neon pooler）
+      idleTimeoutMillis: 10000,
     });
   }
   return pool;
+}
+
+/** 直接執行（可多句 SQL，初始化用） */
+async function exec(sql) {
+  return getPool().query(sql);
 }
 
 async function q(sql, params) {
@@ -136,4 +147,4 @@ async function listQuotes(limit = 50) {
             FROM quotes ORDER BY created_at DESC LIMIT $1`, [limit]);
 }
 
-module.exports = { usingDb, loadRefData, saveQuote, getQuote, findLatest, listQuotes, nextQuoteNo };
+module.exports = { exec, usingDb, loadRefData, saveQuote, getQuote, findLatest, listQuotes, nextQuoteNo };

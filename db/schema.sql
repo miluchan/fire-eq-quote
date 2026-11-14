@@ -1,3 +1,4 @@
+
 -- 住宅火災及地震基本保險 報價系統 — Neon PostgreSQL schema
 -- 可重複執行（IF NOT EXISTS）
 

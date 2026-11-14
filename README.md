@@ -1,51 +1,64 @@
 # 住宅火災及地震基本保險 報價系統
 
-CodeSandbox（Node.js）＋ Neon PostgreSQL。畫面依「報價／承保內容／試算結果／要保書填寫」版面製作。
+Vercel（靜態頁＋Serverless Functions）＋ Neon PostgreSQL。畫面依「報價／承保內容／試算結果／要保書填寫」版面製作。
 
 ```
 fire-eq-quote/
-├─ server.js              HTTP 伺服器＋API（只依賴 pg）
+├─ public/                前端畫面 index.html / style.css / app.js（Vercel 直接當網站）
+├─ api/                   Vercel Functions：health / refdata / suggest / calc / quotes / init
 ├─ src/premium.js         保費計算引擎（純函式，有單元測試）
-├─ src/db.js              資料存取（Neon；未設定時自動用記憶體模式）
+├─ src/handlers.js        API 邏輯（Vercel 與本機共用）
+├─ src/db.js              資料存取（Neon；未設定時用記憶體模式）
 ├─ src/refdata.js         初始費率／造價表／郵遞區號（種子資料）
-├─ db/schema.sql          資料表
-├─ db/seed.sql            種子資料 SQL（由 refdata.js 產生）
-├─ scripts/db-init.js     一鍵建表＋寫入種子資料
-├─ public/                前端畫面 index.html / style.css / app.js
-├─ test/premium.test.js   計算測試
-└─ .codesandbox/tasks.json
+├─ src/schema.js          資料表定義
+├─ src/seed.js            產生種子資料 SQL
+├─ db/schema.sql, seed.sql 同上內容的 SQL 檔（可貼 Neon SQL Editor）
+├─ server.js              本機開發用（npm run dev），Vercel 不使用
+├─ vercel.json            函式區域 sin1（新加坡，與 Neon 同區）
+└─ test/premium.test.js
 ```
 
 ---
 
-## 一、部署步驟
+## 一、部署步驟（Vercel）
 
-### 1. Neon 建立資料庫
-1. 登入 <https://console.neon.tech> → **New Project**（Region 建議選 *AWS Asia Pacific (Singapore)*）。
-2. 進入專案 → **Connection Details**（或 Connect）→ 選 **Node.js**，勾選 *Pooled connection*，複製連線字串，格式如：
-   `postgresql://user:pass@ep-xxx-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require`
+### 1. 上傳到 GitHub
+把本資料夾**所有內容**（含 `.gitignore`）放到 repo `fire-eq-quote` 的最上層。
+若 repo 裡還有舊版的 `.codesandbox` 資料夾，可以刪掉（留著也不影響）。
 
-### 2. CodeSandbox 匯入程式
-1. 把整個資料夾推到 GitHub（新 repo，例如 `fire-eq-quote`）。
-2. CodeSandbox → **Import repository** → 選該 repo（會建立 Devbox，自動執行 `npm install` 與 `npm start`）。
-   - 也可以 **Create → Node.js Devbox**，再把檔案拖進去。
-3. 右側 **⚙ Project Settings → Env Variables** 新增：
-   `DATABASE_URL` = 上一步複製的連線字串
-   新增後按 **Restart** 讓環境變數生效。
+### 2. Vercel 匯入專案
+1. Vercel → **Add New… → Project** → 選 `fire-eq-quote` → **Import**
+2. 設定：
+   - **Framework Preset**：`Other`
+   - **Root Directory**：`./`
+   - **Build Command / Output Directory / Install Command**：都不用改（留空/預設）
+3. 按 **Deploy**。此時網站可開，右上角會顯示橘色「記憶體模式」（還沒接資料庫）。
 
-### 3. 初始化資料庫（只需一次）
-CodeSandbox 終端機執行：
+### 3. 連接 Neon 資料庫（自動帶入 DATABASE_URL）
+1. Vercel → **Storage** → 點 `fire-eq-quote` 資料庫 → 右上 **Connect to Project**
+2. 選剛建立的 Vercel 專案；Environments 全勾（Development / Preview / Production）；**Custom Prefix 留空**（變數名才會是 `DATABASE_URL`）→ **Connect**
+3. 回到專案 → **Deployments** → 最新一筆右側 **⋯ → Redeploy**（環境變數要重新部署才生效）
+
+### 4. 初始化資料庫（只做一次）
+瀏覽器開：
+```
+https://你的專案網址.vercel.app/api/init
+```
+看到 `✔ 資料表建立完成、種子資料寫入完成`、`zips: 365` 即成功。
+（已初始化過再開，只會回覆「已初始化過」，不會重灌。）
+
+### 5. 使用
+開 `https://你的專案網址.vercel.app/`，右上角顯示綠色 **Neon DB** 即完成。
+
+### 本機開發（選用）
 ```bash
-npm run db:init
+npm install
+cp .env.example .env    # 填入 Neon 連線字串；不填則為記憶體模式
+npm run dev             # http://localhost:3000
+npm test
 ```
-看到 `✔ schema 建立完成`、`✔ 種子資料寫入完成`、`郵遞區號 365 筆` 即成功。
-（也可以改到 Neon 的 **SQL Editor** 先貼 `db/schema.sql` 再貼 `db/seed.sql` 執行。）
-
-### 4. 使用
-預覽視窗開 port 3000。右上角標籤顯示 **Neon DB**（綠）表示已連資料庫；**記憶體模式**（橘）表示 `DATABASE_URL` 沒設好，報價重啟後會消失。
 
 ---
-
 ## 二、保費計算公式
 
 ### 1. 建議保額（重置成本）—「建議保額」按鈕
@@ -90,7 +103,7 @@ npm run db:init
 
 > ⚠ **住宅火險是自由費率**（98 年 4 月起已無統一規章費率），上表是公會最後公開的規章基本費率，只當起始值。
 > 請把 `building_grades.fire_rate` 改成貴公司向金管會報備的費率，或調整 `settings.fire_rate_factor`（例如 0.6 = 打 6 折）。
-> 改完呼叫 `POST /api/refdata/reload` 或重啟服務即生效。
+> 改完約 1 分鐘內生效（參考資料快取 60 秒）。
 
 建築等級：系統依「外牆構造」建議等級，屋頂為瓦／金屬往下調一級、木竹往下調兩級，承辦人可直接改下拉選單。
 
@@ -134,22 +147,28 @@ npm run db:init
 | `quotes` | 報價/要保書（要保人、被保險人為 JSONB；保額保費由伺服器重算後存檔） |
 | `quote_seq` | 要保號碼每日流水號（H + 民國年月日 + 4 碼） |
 
+
 ## 四、API
 
 | 方法 | 路徑 | 說明 |
 |---|---|---|
 | GET | `/api/health` | 健康檢查，回傳 db = neon / memory |
-| GET | `/api/refdata` | 下拉選單與費率表 |
-| POST | `/api/refdata/reload` | 修改 DB 費率後重新載入快取 |
+| GET | `/api/refdata` | 下拉選單與費率表（快取 60 秒，改 DB 費率後最多 1 分鐘生效） |
 | POST | `/api/suggest` | 建議保額 |
 | POST | `/api/calc` | 保費計算 |
 | GET | `/api/quotes?q=要保號碼或身分證` | 載入前期資料（最近一筆） |
-| GET | `/api/quotes/:quoteNo` | 讀取報價 |
+| GET | `/api/quotes?no=要保號碼` | 讀取報價 |
+| GET | `/api/quotes` | 最近 50 筆報價 |
 | POST | `/api/quotes` | 儲存要保書（伺服器端重算保費） |
+| GET | `/api/init` | 一次性建立資料表＋種子資料；重灌需設定 `INIT_TOKEN` 並帶 `?token=` |
 
-## 五、測試
-```bash
-npm test
+## 五、修改費率
+在 Neon（Vercel Storage → Open in Neon → Tables 或 SQL Editor）直接改：
+```sql
+-- 改成公司報備費率（每千元）
+UPDATE building_grades SET fire_rate = 0.25 WHERE code = '1';
+-- 或整體打折
+UPDATE settings SET value = '0.6' WHERE key = 'fire_rate_factor';
 ```
 
 ## 六、資料來源
