@@ -191,3 +191,128 @@ ALTER TABLE quotes ADD COLUMN IF NOT EXISTS policy_no    VARCHAR(20);           
 ALTER TABLE quotes ADD COLUMN IF NOT EXISTS paid_at      TIMESTAMPTZ;             -- 繳費時間（預留）
 ALTER TABLE quotes ADD COLUMN IF NOT EXISTS deleted_at   TIMESTAMPTZ;             -- 軟刪除
 CREATE INDEX IF NOT EXISTS idx_quotes_status ON quotes (status1, status2) WHERE deleted_at IS NULL;
+
+-- ═════════════ 保批單帳款檔 ═════════════
+CREATE TABLE IF NOT EXISTS ao_plyedr_prem (
+  id          BIGSERIAL PRIMARY KEY,
+  ipolicy1 VARCHAR(20) NOT NULL DEFAULT '',  -- 1 保單號碼1
+  ipolicy2 VARCHAR(20) NOT NULL DEFAULT '',  -- 2 保單號碼2
+  iendorse VARCHAR(20) NOT NULL DEFAULT '',  -- 3 批單號碼
+  icard VARCHAR(20) NOT NULL DEFAULT '',  -- 4 保險證號
+  dplyend DATE,  -- 5 出單日
+  ftype VARCHAR(1) NOT NULL DEFAULT '',  -- 6 類別型態
+  isub VARCHAR(2) NOT NULL DEFAULT '',  -- 7 出單公司
+  itakeover VARCHAR(2) NOT NULL DEFAULT '',  -- 8 支付公司
+  nassured VARCHAR(120) NOT NULL DEFAULT '',  -- 10 保戶名稱
+  ibroker VARCHAR(10) NOT NULL DEFAULT '',  -- 11 經紀人
+  icashier VARCHAR(10) NOT NULL DEFAULT '',  -- 12 收費員
+  mprem NUMERIC(17,4) NOT NULL DEFAULT 0,  -- 13 保費金額
+  mdiscount NUMERIC(17,4) NOT NULL DEFAULT 0,  -- 14 折讓金額
+  icur VARCHAR(2) NOT NULL DEFAULT '',  -- 15 幣別
+  aassured VARCHAR(50) NOT NULL DEFAULT '',  -- 16 保戶通訊地址
+  aassured_a VARCHAR(50) NOT NULL DEFAULT '',  -- 17 保戶戶籍地址
+  dbegin DATE,  -- 18 承保始期
+  dend DATE,  -- 19 承保終期
+  ipay VARCHAR(12) NOT NULL DEFAULT '',  -- 20 收費單/退撥單號
+  dpay DATE,  -- 21 收費日期
+  fcommit VARCHAR(2) NOT NULL DEFAULT '',  -- 22 佣金別
+  ireplace VARCHAR(20) NOT NULL DEFAULT '',  -- 23 抵繳單號
+  eprocess VARCHAR(60) NOT NULL DEFAULT '',  -- 24 說明
+  frcvpay VARCHAR(1) NOT NULL DEFAULT '',  -- 25 收支註記
+  dcancel DATE,  -- 26 註銷擬辦日
+  idoc_seq VARCHAR(12) NOT NULL DEFAULT '',  -- 27 函證批號
+  idoc VARCHAR(12) NOT NULL DEFAULT '',  -- 28 函證編號
+  fpay_cond VARCHAR(1) NOT NULL DEFAULT '',  -- 29 付款狀況
+  iaccount VARCHAR(14) NOT NULL DEFAULT '',  -- 30 付款帳號
+  iperiod VARCHAR(3) NOT NULL DEFAULT '',  -- 31 保期
+  ipd_type VARCHAR(1) NOT NULL DEFAULT '',  -- 32 保期別
+  ireceived INTEGER NOT NULL DEFAULT 0,  -- 33 部份收費累計次數
+  mpartsum NUMERIC(17,4) NOT NULL DEFAULT 0,  -- 34 部份收費累計金額
+  pcurrency NUMERIC(11,4) NOT NULL DEFAULT 0,  -- 35 幣別匯率
+  iofficer VARCHAR(10) NOT NULL DEFAULT '',  -- 36 經辦人
+  insure_type VARCHAR(2) NOT NULL DEFAULT '',  -- 37 險別
+  ibig_resource VARCHAR(4) NOT NULL DEFAULT '',  -- 38 大客戶代碼
+  dacc DATE,  -- 39 立帳日期
+  puredplyend DATE,  -- 40 原始出單日
+  mprem_nt NUMERIC(17,0) NOT NULL DEFAULT 0,  -- 41 台幣應收保費
+  mcompensation_nt NUMERIC(17,0) NOT NULL DEFAULT 0,  -- 42 代收補償基金
+  iacc VARCHAR(12) NOT NULL DEFAULT '',  -- 43 立帳製票號碼
+  ibatch_no SMALLINT NOT NULL DEFAULT 0,  -- 44 批號(大保單用)
+  mdiscount_nt NUMERIC(17,0) NOT NULL DEFAULT 0,  -- 45 台幣折讓金額
+  sys_source VARCHAR(10) NOT NULL DEFAULT '',  -- 46 系統來源代號
+  ibank VARCHAR(8) NOT NULL DEFAULT '',  -- 47 匯款銀行代號
+  irelative VARCHAR(20) NOT NULL DEFAULT '',  -- 48 車險關連保單號
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- 舊版（v4 只有 1~32 欄）補欄位，可重複執行
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS ipolicy1 VARCHAR(20) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS ipolicy2 VARCHAR(20) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS iendorse VARCHAR(20) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS icard VARCHAR(20) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS dplyend DATE;
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS ftype VARCHAR(1) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS isub VARCHAR(2) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS itakeover VARCHAR(2) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS nassured VARCHAR(120) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS ibroker VARCHAR(10) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS icashier VARCHAR(10) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS mprem NUMERIC(17,4) NOT NULL DEFAULT 0;
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS mdiscount NUMERIC(17,4) NOT NULL DEFAULT 0;
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS icur VARCHAR(2) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS aassured VARCHAR(50) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS aassured_a VARCHAR(50) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS dbegin DATE;
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS dend DATE;
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS ipay VARCHAR(12) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS dpay DATE;
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS fcommit VARCHAR(2) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS ireplace VARCHAR(20) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS eprocess VARCHAR(60) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS frcvpay VARCHAR(1) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS dcancel DATE;
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS idoc_seq VARCHAR(12) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS idoc VARCHAR(12) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS fpay_cond VARCHAR(1) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS iaccount VARCHAR(14) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS iperiod VARCHAR(3) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS ipd_type VARCHAR(1) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS ireceived INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS mpartsum NUMERIC(17,4) NOT NULL DEFAULT 0;
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS pcurrency NUMERIC(11,4) NOT NULL DEFAULT 0;
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS iofficer VARCHAR(10) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS insure_type VARCHAR(2) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS ibig_resource VARCHAR(4) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS dacc DATE;
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS puredplyend DATE;
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS mprem_nt NUMERIC(17,0) NOT NULL DEFAULT 0;
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS mcompensation_nt NUMERIC(17,0) NOT NULL DEFAULT 0;
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS iacc VARCHAR(12) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS ibatch_no SMALLINT NOT NULL DEFAULT 0;
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS mdiscount_nt NUMERIC(17,0) NOT NULL DEFAULT 0;
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS sys_source VARCHAR(10) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS ibank VARCHAR(8) NOT NULL DEFAULT '';
+ALTER TABLE ao_plyedr_prem ADD COLUMN IF NOT EXISTS irelative VARCHAR(20) NOT NULL DEFAULT '';
+
+-- 索引鍵（依規格）
+DROP INDEX IF EXISTS ux_plyedr_prem_key;
+DROP INDEX IF EXISTS idx_plyedr_prem_dplyend;
+CREATE UNIQUE INDEX IF NOT EXISTS ao_plyedr_ix_1 ON ao_plyedr_prem (ipolicy1, ipolicy2, iendorse);
+CREATE INDEX IF NOT EXISTS ao_plyedr_ix_2 ON ao_plyedr_prem (iendorse);
+CREATE INDEX IF NOT EXISTS ao_plyedr_ix_3 ON ao_plyedr_prem (icard);
+CREATE INDEX IF NOT EXISTS ao_plyedr_ix_4 ON ao_plyedr_prem (icashier);
+CREATE INDEX IF NOT EXISTS ao_plyedr_prem_x1 ON ao_plyedr_prem (dplyend, ftype, ipolicy1, ipolicy2, iendorse);
+CREATE INDEX IF NOT EXISTS ao_plyedr_prem_x2 ON ao_plyedr_prem (dpay, ftype, frcvpay, ipolicy1, ipolicy2, iendorse);
+
+-- 補齊 v4 已出單資料的新寫入項目（只補空的，可重複執行）
+UPDATE ao_plyedr_prem a
+   SET insure_type = 'PF', puredplyend = a.dplyend, mprem_nt = round(a.mprem),
+       nassured = COALESCE(LEFT(q.insured->>'name', 120), '')
+  FROM quotes q
+ WHERE q.policy_no = a.ipolicy1 AND a.ftype = 'P' AND a.insure_type = '';
+
+-- 保單號碼每日流水號（PF + 民國年月日 + 4 碼）
+CREATE TABLE IF NOT EXISTS policy_seq (
+  day  DATE PRIMARY KEY,
+  last INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_quotes_policy_no ON quotes (policy_no) WHERE policy_no IS NOT NULL;

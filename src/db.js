@@ -6,7 +6,8 @@
 const R = require('./refdata');
 
 let pool = null;
-const mem = { quotes: new Map(), seq: new Map() };
+const mem = { quotes: new Map(), seq: new Map(), ledger: [], policySeq: new Map() };
+const L = require('./ledger');
 
 function dbUrl() {
   return process.env.DATABASE_URL || process.env.POSTGRES_URL || '';
@@ -207,4 +208,106 @@ async function deleteQuote(quoteNo) {
   return rows.length > 0;
 }
 
-module.exports = { exec, usingDb, loadRefData, saveQuote, getQuote, findLatest, listQuotes, deleteQuote, nextQuoteNo };
+class DbError extends Error {
+  constructor(status, message) { super(message); this.status = status; }
+}
+
+/** 台灣今天 'YYYY-MM-DD' */
+function taipeiToday() {
+  return new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
+/**
+ * 確認出單（單一交易）：
+ * 鎖定報價單 → 檢查「已要保」→ 取保單號 → 寫入 ao_plyedr_prem → 報價單改「已出單」
+ * build(q, policyNo, day) 回傳要寫入帳款檔的欄位
+ */
+async function issuePolicy(quoteNo, build) {
+  if (!usingDb()) {
+    const q = mem.quotes.get(quoteNo);
+    if (!q || q.deleted_at) throw new DbError(404, '查無此報價單號');
+    if (q.status1 !== '已要保') throw new DbError(409, `報價單狀態為「${q.status1}」，需「已要保」才能出單`);
+    const day = taipeiToday();
+    const n = (mem.policySeq.get(day) || 0) + 1;
+    mem.policySeq.set(day, n);
+    const policyNo = L.policyNoOf(day, n);
+    const row = { id: mem.ledger.length + 1, created_at: new Date().toISOString() };
+    for (const f of L.LEDGER_FIELDS) row[f.name] = f.type === 'DATE' ? null : /^(DECIMAL|INTEGER|SMALLINT)/.test(f.type) ? 0 : '';
+    Object.assign(row, build(q, policyNo, day));
+    row.mprem = Number(row.mprem).toFixed(4);
+    mem.ledger.push(row);
+    Object.assign(q, { status1: '已出單', policy_no: policyNo, issued_at: new Date().toISOString() });
+    return { policyNo, ledger: row, quote: q };
+  }
+
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: [q] } = await client.query(
+      'SELECT * FROM quotes WHERE quote_no = $1 AND deleted_at IS NULL FOR UPDATE', [quoteNo]);
+    if (!q) throw new DbError(404, '查無此報價單號');
+    if (q.status1 !== '已要保') throw new DbError(409, `報價單狀態為「${q.status1}」，需「已要保」才能出單`);
+    if (q.policy_no) throw new DbError(409, `此報價單已出單（保單號碼 ${q.policy_no}）`);
+
+    const { rows: [d] } = await client.query(`SELECT to_char((now() AT TIME ZONE 'Asia/Taipei')::date, 'YYYY-MM-DD') AS day`);
+    const { rows: [s] } = await client.query(
+      `INSERT INTO policy_seq (day, last) VALUES ($1, 1)
+       ON CONFLICT (day) DO UPDATE SET last = policy_seq.last + 1 RETURNING last`, [d.day]);
+    const policyNo = L.policyNoOf(d.day, s.last);
+
+    const rec = build(q, policyNo, d.day);
+    const cols = Object.keys(rec);
+    const { rows: [ledger] } = await client.query(
+      `INSERT INTO ao_plyedr_prem (${cols.join(', ')}) VALUES (${cols.map((_, i) => `$${i + 1}`).join(', ')}) RETURNING *`,
+      cols.map((c) => rec[c]));
+    const { rows: [quote] } = await client.query(
+      `UPDATE quotes SET status1 = '已出單', policy_no = $2, issued_at = now(), updated_at = now()
+        WHERE quote_no = $1 RETURNING *`, [quoteNo, policyNo]);
+    await client.query('COMMIT');
+    return { policyNo, ledger, quote };
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+/** 帳款檔清單（可依保單號碼/報價單號/要保人、收支註記、類別型態篩選） */
+async function listLedger({ kw = '', frcvpay = '', ftype = '', limit = 200 } = {}) {
+  const k = String(kw).trim();
+  if (!usingDb()) {
+    return mem.ledger
+      .map((r) => {
+        const q = [...mem.quotes.values()].find((x) => x.policy_no === r.ipolicy1);
+        return { ...r, quote_no: q?.quote_no || '', applicant_name: q?.applicant?.name || '' };
+      })
+      .filter((r) => !k || r.ipolicy1.includes(k.toUpperCase()) || r.quote_no.includes(k.toUpperCase()) || r.nassured.includes(k))
+      .filter((r) => !frcvpay || r.frcvpay === frcvpay)
+      .filter((r) => !ftype || r.ftype === ftype)
+      .reverse().slice(0, limit);
+  }
+  return q(
+    `SELECT a.id, a.ipolicy1, a.iendorse, a.dplyend, a.ftype, a.insure_type, a.nassured, a.isub, a.mprem, a.icur,
+            a.dbegin, a.dend, a.fcommit, a.frcvpay,
+            COALESCE(qt.quote_no, '') AS quote_no, COALESCE(qt.applicant->>'name', '') AS applicant_name
+       FROM ao_plyedr_prem a
+       LEFT JOIN quotes qt ON qt.policy_no = a.ipolicy1
+      WHERE ($1 = '' OR a.ipolicy1 ILIKE '%' || $1 || '%' OR qt.quote_no ILIKE '%' || $1 || '%'
+             OR a.nassured ILIKE '%' || $1 || '%')
+        AND ($2 = '' OR a.frcvpay = $2)
+        AND ($3 = '' OR a.ftype = $3)
+      ORDER BY a.id DESC
+      LIMIT $4`, [k, frcvpay, ftype, limit]);
+}
+
+async function getLedger(id) {
+  if (!usingDb()) return mem.ledger.find((r) => String(r.id) === String(id)) || null;
+  const rows = await q('SELECT * FROM ao_plyedr_prem WHERE id = $1', [Number(id) || 0]);
+  return rows[0] || null;
+}
+
+module.exports = {
+  exec, usingDb, loadRefData, saveQuote, getQuote, findLatest, listQuotes, deleteQuote, nextQuoteNo,
+  issuePolicy, listLedger, getLedger,
+};

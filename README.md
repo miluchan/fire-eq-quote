@@ -177,6 +177,8 @@ npm test
 | `coverage_options` | 險種下拉選項（萬元） |
 | `coverage_premiums` | 方案 × 險種 × 選項 保費（`estimated` 標示推估值） |
 | `coverage_rates` | 依保額計費的險種費率‰（綠能升級） |
+| `ao_plyedr_prem` | 保批單帳款檔（規格 1~48 欄，`itakeover_i` 標示不用未建，共 47 欄）。CHAR→VARCHAR 預設空白、DATE 預設 NULL、DECIMAL/INTEGER/SMALLINT 預設 0；索引依規格 ao_plyedr_ix_1(U) ~ ix_4、prem_x1、prem_x2 |
+| `policy_seq` | 保單號碼每日流水號（PF + 民國年月日 + 4 碼，例 PF11511160001） |
 | `quotes` | 報價單：方案、狀態1（報價中/已要保/已出單）、狀態2（未繳費/已繳費/已銷帳）、住火/地震/居家保費、試算明細；預留 policy_no / issued_at / paid_at；刪除為軟刪除 |
 | `quote_seq` | 要保號碼每日流水號（H + 民國年月日 + 4 碼） |
 
@@ -194,7 +196,31 @@ npm test
 | GET | `/api/quotes?kw=&status1=&status2=` | 查詢一覽表 |
 | POST | `/api/quotes` | `action: save` 儲存報價單／`confirm` 確認要保（伺服器端重算保費；非報價中不可改） |
 | DELETE | `/api/quotes?no=報價單號` | 刪除（僅報價中，軟刪除） |
+| POST | `/api/issue` | 確認出單 `{quoteNo}`：需「已要保」；單一交易寫入 ao_plyedr_prem、報價單改「已出單」並記錄保單號碼 |
+| GET | `/api/ledger?kw=&ftype=&frcvpay=` | 帳款檔清單 |
+| GET | `/api/ledger?id=` | 帳款檔內容 |
 | GET | `/api/init` | 建立／更新資料表＋種子資料（可重複執行） |
+
+### 出單寫入帳款檔的內容
+| 欄位 | 值 |
+|---|---|
+| ipolicy1 保單號碼1 | PF + 出單日(民國) + 4 碼流水號 |
+| dplyend 出單日 | 出單當天（台灣時間） |
+| ftype 類別型態 | P（保單） |
+| isub 出單公司 | 00 |
+| mprem 保費金額 | 報價單保費合計 |
+| icur 幣別 | NT |
+| aassured 保戶通訊地址 | 報價單通訊地址（郵遞區號＋縣市區＋地址，超過 50 字截斷） |
+| dbegin / dend | 報價單保險期間 |
+| fcommit 佣金別 | N（一般） |
+| frcvpay 收支註記 | N（未收費） |
+| nassured 保戶名稱 | 被保險人姓名 |
+| insure_type 險別 | PF |
+| puredplyend 原始出單日 | 同出單日 |
+| mprem_nt 台幣應收保費 | 同 mprem（取整數） |
+| 其他欄位 | 空白（日期 NULL、金額 0） |
+
+報價單狀態流程：儲存報價單 → **報價中** → 確認要保 → **已要保** → 確認出單 → **已出單**
 
 ## 五、修改費率
 

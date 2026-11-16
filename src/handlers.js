@@ -6,6 +6,7 @@ const db = require('./db');
 const P = require('./premium');
 const SCHEMA = require('./schema');
 const { buildSeedSql } = require('./seed');
+const { LEDGER_FIELDS, buildPolicyLedger } = require('./ledger');
 
 // 參考資料快取：Serverless 實例存活期間沿用，60 秒後重新讀 DB（改費率後最多 1 分鐘生效）
 let cache = null;
@@ -92,7 +93,7 @@ const handlers = {
 
   async refdata({ method }) {
     need(method, ['GET']);
-    return ok((await getRef()).raw);
+    return ok({ ...(await getRef()).raw, ledgerFields: LEDGER_FIELDS });
   },
 
   async suggest({ method, body }) {
@@ -190,6 +191,26 @@ const handlers = {
     return ok({ quote: saved, calc: c });
   },
 
+  /** 確認出單：已要保 → 寫入 ao_plyedr_prem、報價單改已出單 */
+  async issue({ method, body }) {
+    need(method, ['POST']);
+    if (!body.quoteNo) throw new HttpError(400, '請先儲存並確認要保');
+    const { ref } = await getRef();
+    const r = await db.issuePolicy(String(body.quoteNo), (q, policyNo, day) => buildPolicyLedger(q, policyNo, day, ref.zips));
+    return ok(r);
+  },
+
+  /** 帳款檔查詢：?id= 內容；否則清單（kw / frcvpay / ftype） */
+  async ledger({ method, query }) {
+    need(method, ['GET']);
+    if (query.id) {
+      const row = await db.getLedger(query.id);
+      if (!row) throw new HttpError(404, '查無此帳款資料');
+      return ok(row);
+    }
+    return ok(await db.listLedger({ kw: query.kw || '', frcvpay: query.frcvpay || '', ftype: query.ftype || '' }));
+  },
+
   /**
    * 建立／更新資料表＋寫入種子資料：瀏覽器開 /api/init
    * 可重複執行、不會刪除資料；費率類資料若已存在不覆蓋（保留在 DB 調整過的費率）
@@ -205,7 +226,8 @@ const handlers = {
       (SELECT count(*) FROM plans)::int AS plans,
       (SELECT count(*) FROM coverages)::int AS coverages,
       (SELECT count(*) FROM coverage_premiums)::int AS coverage_premiums,
-      (SELECT count(*) FROM quotes WHERE deleted_at IS NULL)::int AS quotes`);
+      (SELECT count(*) FROM quotes WHERE deleted_at IS NULL)::int AS quotes,
+      (SELECT count(*) FROM ao_plyedr_prem)::int AS ao_plyedr_prem`);
     return ok({ ok: true, message: '✔ 資料表建立／更新完成、種子資料寫入完成', counts: r.rows[0] });
   },
 };

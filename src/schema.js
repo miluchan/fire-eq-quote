@@ -192,4 +192,4 @@ ALTER TABLE quotes ADD COLUMN IF NOT EXISTS policy_no    VARCHAR(20);           
 ALTER TABLE quotes ADD COLUMN IF NOT EXISTS paid_at      TIMESTAMPTZ;             -- 繳費時間（預留）
 ALTER TABLE quotes ADD COLUMN IF NOT EXISTS deleted_at   TIMESTAMPTZ;             -- 軟刪除
 CREATE INDEX IF NOT EXISTS idx_quotes_status ON quotes (status1, status2) WHERE deleted_at IS NULL;
-`;
+` + require('./ledger').LEDGER_SCHEMA;

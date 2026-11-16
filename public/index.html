@@ -17,6 +17,7 @@
     <button type="button" id="btnClear">清除畫面</button>
     <button type="button" id="btnQuery">查詢報價單</button>
     <button type="button" id="btnPrint">列印報價單</button>
+    <button type="button" id="btnLedger">帳款檔查詢</button>
   </div>
 </header>
 
@@ -242,6 +243,7 @@
     <span id="msg" class="msg"></span>
     <button type="button" id="btnSave">儲存報價單</button>
     <button type="button" id="btnConfirm" class="primary">確認要保</button>
+    <button type="button" id="btnIssue" class="issue" disabled title="需先確認要保">確認出單</button>
   </div>
 </form>
 
@@ -269,6 +271,50 @@
           </tr>
         </thead>
         <tbody id="qmBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ═════════════ 帳款檔查詢 一覽表 ═════════════ -->
+<div id="ledgerModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="lmTitle">
+  <div class="modal-box">
+    <div class="modal-head">
+      <span id="lmTitle">帳款檔查詢　保批單帳款檔 (ao_plyedr_prem)</span>
+      <button type="button" class="modal-x" data-close="ledgerModal" aria-label="關閉">✕</button>
+    </div>
+    <div class="modal-filter">
+      關鍵字 <input id="lmKw" class="w20" placeholder="保單號碼 / 報價單號 / 保戶名稱">
+      類別型態 <select id="lmFtype"><option value="">全部</option></select>
+      收支註記 <select id="lmFrcv"><option value="">全部</option></select>
+      <button type="button" id="lmSearch">查詢</button>
+      <span id="lmCount" class="muted"></span>
+    </div>
+    <div class="modal-body">
+      <table class="list">
+        <thead>
+          <tr>
+            <th>保單號碼1</th><th>報價單號</th><th>保戶名稱</th><th>險別</th><th>出單日</th><th>類別型態</th><th>出單公司</th>
+            <th>保費金額</th><th>幣別</th><th>承保始期</th><th>承保終期</th><th>佣金別</th><th>收支註記</th><th>內容</th>
+          </tr>
+        </thead>
+        <tbody id="lmBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- 帳款檔內容 -->
+<div id="ledgerDetail" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="ldTitle">
+  <div class="modal-box narrow">
+    <div class="modal-head">
+      <span id="ldTitle">帳款檔內容</span>
+      <button type="button" class="modal-x" data-close="ledgerDetail" aria-label="關閉">✕</button>
+    </div>
+    <div class="modal-body">
+      <table class="list detail-table">
+        <thead><tr><th>序號</th><th>欄位</th><th>中文名稱</th><th>資料型別</th><th>內容</th></tr></thead>
+        <tbody id="ldBody"></tbody>
       </table>
     </div>
   </div>

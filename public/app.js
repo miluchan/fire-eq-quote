@@ -103,6 +103,10 @@
     ref.status1.forEach((s) => $('qmS1').insertAdjacentHTML('beforeend', `<option>${esc(s)}</option>`));
     ref.status2.forEach((s) => $('qmS2').insertAdjacentHTML('beforeend', `<option>${esc(s)}</option>`));
 
+    const lf = (n) => ref.ledgerFields.find((f) => f.name === n);
+    Object.entries(lf('ftype').codes).forEach(([k, v]) => $('lmFtype').insertAdjacentHTML('beforeend', `<option value="${esc(k)}">${esc(k)}:${esc(v)}</option>`));
+    Object.entries(lf('frcvpay').codes).forEach(([k, v]) => $('lmFrcv').insertAdjacentHTML('beforeend', `<option value="${esc(k)}">${esc(k)}:${esc(v)}</option>`));
+
     buildRiders();
     resetForm();
     bind();
@@ -270,7 +274,11 @@
   function renderStatus(q) {
     $('statusText').innerHTML = q
       ? `<span class="tag s1">${esc(q.status1)}</span><span class="tag s2">${esc(q.status2)}</span>`
+        + (q.policy_no ? `<span class="tag pol">保單號碼 ${esc(q.policy_no)}</span>` : '')
       : '';
+    const canIssue = Boolean(q && q.status1 === '已要保' && !q.policy_no);
+    $('btnIssue').disabled = !canIssue;
+    $('btnIssue').title = canIssue ? '' : (q?.policy_no ? '已出單' : '需先確認要保');
   }
 
   /** view：唯讀檢視（查詢或非報價中）；edit/new：可編輯 */
@@ -278,7 +286,7 @@
     mode = m;
     const ro = m === 'view';
     $$('#f input, #f select, #f button').forEach((el) => {
-      if (['quoteNo', 'prevQuoteNo', 'periodMonths'].includes(el.id) || el.classList.contains('follow-prop')) return;
+      if (['quoteNo', 'prevQuoteNo', 'periodMonths', 'btnIssue'].includes(el.id) || el.classList.contains('follow-prop')) return;
       el.disabled = ro;
     });
     $('btnSave').classList.toggle('hidden', ro);
@@ -290,7 +298,10 @@
 
   async function withBusy(btn, fn) {
     btn.disabled = true;
-    try { await fn(); } catch (e) { msg(e.message, false); } finally { if (mode !== 'view' || !btn.closest('#f')) btn.disabled = false; }
+    try { await fn(); } catch (e) { msg(e.message, false); } finally {
+      if (btn.id === 'btnIssue') renderStatus(current);
+      else if (mode !== 'view' || !btn.closest('#f')) btn.disabled = false;
+    }
   }
 
   function resetForm() {
@@ -394,11 +405,29 @@
     });
     $('btnQuery').addEventListener('click', openQuery);
     $('btnPrint').addEventListener('click', printQuote);
+    $('btnLedger').addEventListener('click', openLedger);
+    $('btnIssue').addEventListener('click', () => withBusy($('btnIssue'), issuePolicy));
+
+    // 帳款檔
+    $$('[data-close]').forEach((b) => b.addEventListener('click', () => $(b.dataset.close).classList.add('hidden')));
+    ['ledgerModal', 'ledgerDetail'].forEach((id) => $(id).addEventListener('click', (e) => { if (e.target.id === id) $(id).classList.add('hidden'); }));
+    $('lmSearch').addEventListener('click', loadLedger);
+    $('lmKw').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadLedger(); });
+    $('lmFtype').addEventListener('change', loadLedger);
+    $('lmFrcv').addEventListener('change', loadLedger);
+    $('lmBody').addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-id]');
+      if (b) openLedgerDetail(b.dataset.id).catch((err) => alert(err.message));
+    });
 
     // 查詢視窗
     $('qmClose').addEventListener('click', closeQuery);
     $('queryModal').addEventListener('click', (e) => { if (e.target.id === 'queryModal') closeQuery(); });
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('queryModal').classList.contains('hidden')) closeQuery(); });
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      const open = ['ledgerDetail', 'ledgerModal', 'queryModal'].find((id) => !$(id).classList.contains('hidden'));
+      if (open) $(open).classList.add('hidden');
+    });
     $('qmSearch').addEventListener('click', loadList);
     $('qmKw').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadList(); });
     $('qmS1').addEventListener('change', loadList);
@@ -562,6 +591,82 @@
     } catch (err) {
       alert(err.message);
     }
+  }
+
+  // ── 確認出單 ─────────────────────────────────────
+  async function issuePolicy() {
+    if (!current || current.status1 !== '已要保') throw new Error('需先「確認要保」才能出單');
+    if (!confirm(`確定將報價單 ${current.quote_no} 出單？\n出單後將寫入保批單帳款檔，報價單轉為「已出單」。`)) return;
+    const r = await api('/api/issue', { quoteNo: current.quote_no });
+    current = r.quote;
+    renderStatus(current);
+    setMode('view', `報價單 ${current.quote_no} 已出單，保單號碼 ${r.policyNo}（已出單／${current.status2}）。可於右上「帳款檔查詢」查看帳款資料。`);
+    msg(`出單成功，保單號碼 ${r.policyNo}，保費 ${fmt(r.ledger.mprem)} 元已寫入帳款檔`);
+  }
+
+  // ── 帳款檔查詢 ───────────────────────────────────
+  const rocCompact = (iso) => {
+    if (!iso) return '';
+    const [y, m, d] = String(iso).slice(0, 10).split('-');
+    return `${Number(y) - 1911}${m}${d}`;
+  };
+  const ledgerField = (name) => REF.ledgerFields.find((f) => f.name === name);
+  const codeText = (name, v) => {
+    const c = ledgerField(name)?.codes;
+    return v && c && c[v] ? `${v}:${c[v]}` : (v ?? '');
+  };
+
+  function openLedger() {
+    $('ledgerModal').classList.remove('hidden');
+    $('lmKw').focus();
+    loadLedger();
+  }
+
+  async function loadLedger() {
+    const p = new URLSearchParams({ kw: $('lmKw').value.trim(), ftype: $('lmFtype').value, frcvpay: $('lmFrcv').value });
+    $('lmBody').innerHTML = '<tr><td colspan="14" class="center muted">查詢中…</td></tr>';
+    try {
+      const rows = await api('/api/ledger?' + p.toString());
+      $('lmCount').textContent = `共 ${rows.length} 筆`;
+      $('lmBody').innerHTML = rows.length ? rows.map((r) => `<tr>
+          <td><b>${esc(r.ipolicy1)}</b></td>
+          <td>${esc(r.quote_no)}</td>
+          <td>${esc(r.nassured)}</td>
+          <td>${esc(codeText('insure_type', r.insure_type))}</td>
+          <td>${rocCompact(r.dplyend)}</td>
+          <td>${esc(codeText('ftype', r.ftype))}</td>
+          <td>${esc(r.isub)}</td>
+          <td class="r"><b>${fmt(r.mprem)}</b></td>
+          <td>${esc(r.icur)}</td>
+          <td>${rocCompact(r.dbegin)}</td>
+          <td>${rocCompact(r.dend)}</td>
+          <td>${esc(codeText('fcommit', r.fcommit))}</td>
+          <td><span class="tag s2">${esc(codeText('frcvpay', r.frcvpay))}</span></td>
+          <td><button type="button" data-id="${esc(r.id)}">內容</button></td>
+        </tr>`).join('') : '<tr><td colspan="14" class="center muted">查無資料</td></tr>';
+    } catch (e) {
+      $('lmBody').innerHTML = `<tr><td colspan="14" class="center err">${esc(e.message)}</td></tr>`;
+    }
+  }
+
+  async function openLedgerDetail(id) {
+    const r = await api('/api/ledger?id=' + encodeURIComponent(id));
+    $('ldTitle').textContent = `帳款檔內容　${r.ipolicy1}`;
+    $('ldBody').innerHTML = REF.ledgerFields.map((f) => {
+      const v = r[f.name];
+      let text;
+      if (f.type === 'DATE') text = rocCompact(v);
+      else if (f.type.startsWith('DECIMAL')) {
+        const scale = Number((f.type.match(/,(\d+)\)/) || [])[1] || 0);
+        text = Number(v || 0).toLocaleString('zh-TW', { minimumFractionDigits: scale, maximumFractionDigits: scale });
+      } else if (f.type === 'INTEGER' || f.type === 'SMALLINT') text = String(v ?? 0);
+      else text = codeText(f.name, v);
+      const filled = /^(DECIMAL|INTEGER|SMALLINT)/.test(f.type) ? Number(v) !== 0 : Boolean(v);
+      return `<tr class="${filled ? 'filled' : ''}">
+        <td class="center">${f.seq}</td><td class="code">${esc(f.name)}</td><td>${esc(f.label)}</td>
+        <td class="code">${esc(f.type)}</td><td class="val">${esc(text)}</td></tr>`;
+    }).join('');
+    $('ledgerDetail').classList.remove('hidden');
   }
 
   init().catch((e) => msg('初始化失敗：' + e.message, false));
