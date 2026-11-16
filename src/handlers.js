@@ -40,18 +40,48 @@ function toCalcInput(b) {
     decorationPerPing: b.decorationPerPing,
     buildingSumWan: b.buildingSumWan,
     movableAddWan: b.movableAddWan,
+    planCode: b.planCode || 'HF',
+    propSumWan: b.propSumWan,
+    eqAlready: Boolean(b.eqAlready),
+    coverages: b.coverages || {},
     periodMonths: months,
   };
 }
 
-const ID_RE = /^[A-Z][12890]\d{8}$|^[A-Z][A-D]\d{8}$|^\d{8}$/;
-function validateForSave(b) {
+/** 身分證 / 新舊式居留證 / 統一編號 檢核 */
+function validId(v) {
+  v = String(v || '').toUpperCase();
+  if (/^\d{8}$/.test(v)) {
+    const w = [1, 2, 1, 2, 1, 2, 4, 1];
+    let sum = 0;
+    for (let i = 0; i < 8; i++) { const p = Number(v[i]) * w[i]; sum += Math.floor(p / 10) + (p % 10); }
+    return sum % 5 === 0 || (v[6] === '7' && (sum + 1) % 5 === 0);
+  }
+  if (!/^[A-Z][12890A-D]\d{8}$/.test(v)) return false;
+  const letters = 'ABCDEFGHJKLMNPQRSTUVXYWZIO';
+  const code = letters.indexOf(v[0]) + 10;
+  const second = /[A-D]/.test(v[1]) ? (letters.indexOf(v[1]) + 10) % 10 : Number(v[1]);
+  const digits = [Math.floor(code / 10), code % 10, second, ...v.slice(2).split('').map(Number)];
+  const w = [1, 9, 8, 7, 6, 5, 4, 3, 2, 1, 1];
+  return digits.reduce((s2, d, i) => s2 + d * w[i], 0) % 10 === 0;
+}
+
+/** 儲存報價單：只檢查最基本欄位；確認要保：要保書全部必填 */
+function validate(b, action) {
   const errs = [];
-  if (!b.insured?.name) errs.push('被保險人姓名');
-  if (!b.insured?.id_no || !ID_RE.test(String(b.insured.id_no).toUpperCase())) errs.push('被保險人身分證統編格式');
   if (!b.applicant?.name) errs.push('要保人姓名');
-  if (!b.propertyAddr) errs.push('標的物地址');
   if (!b.periodStart || !b.periodEnd) errs.push('保險期間');
+  if (action === 'confirm') {
+    if (!b.insured?.name) errs.push('被保險人姓名');
+    if (!validId(b.insured?.id_no)) errs.push('被保險人身分證統編');
+    if (!validId(b.applicant?.id_no)) errs.push('要保人身分證統編');
+    for (const [who, label] of [['insured', '被保險人'], ['applicant', '要保人']]) {
+      const bd = b[who]?.birthday;
+      if (bd && !/^\d{7}$/.test(bd)) errs.push(`${label}生日格式(CYYMMDD)`);
+    }
+    if (!b.propertyAddr) errs.push('標的物地址');
+    if (!b.mailAddr) errs.push('通訊地址');
+  }
   return errs;
 }
 
@@ -74,35 +104,56 @@ const handlers = {
   async calc({ method, body }) {
     need(method, ['POST']);
     const { ref } = await getRef();
-    return ok(P.calculate(ref, toCalcInput(body)));
+    return ok(P.calcAny(ref, toCalcInput(body)));
   },
 
   async quotes({ method, query, body }) {
-    need(method, ['GET', 'POST']);
+    need(method, ['GET', 'POST', 'DELETE']);
+
     if (method === 'GET') {
-      if (query.q) {
+      if (query.q) { // 載入前期資料
         const row = await db.findLatest(String(query.q).trim().toUpperCase());
         if (!row) throw new HttpError(404, '查無前期資料');
         return ok(row);
       }
       if (query.no) {
         const row = await db.getQuote(String(query.no));
-        if (!row) throw new HttpError(404, '查無此要保號碼');
+        if (!row) throw new HttpError(404, '查無此報價單號');
         return ok(row);
       }
-      return ok(await db.listQuotes());
+      return ok(await db.listQuotes({ kw: query.kw || '', status1: query.status1 || '', status2: query.status2 || '' }));
     }
 
+    if (method === 'DELETE') {
+      const row = await db.getQuote(String(query.no || ''));
+      if (!row) throw new HttpError(404, '查無此報價單號');
+      if (row.status1 !== '報價中') throw new HttpError(409, `「${row.status1}」的報價單不可刪除`);
+      await db.deleteQuote(row.quote_no);
+      return ok({ ok: true });
+    }
+
+    // POST：action = save（儲存報價單）/ confirm（確認要保）
     const b = body;
-    const errs = validateForSave(b);
+    const action = b.action === 'confirm' ? 'confirm' : 'save';
+    const existing = b.quoteNo ? await db.getQuote(b.quoteNo) : null;
+    if (b.quoteNo && !existing) throw new HttpError(404, '查無此報價單號（可能已刪除）');
+    if (existing && existing.status1 !== '報價中') {
+      throw new HttpError(409, `此報價單狀態為「${existing.status1}」，不可修改`);
+    }
+    const errs = validate(b, action);
     if (errs.length) throw new HttpError(400, `請確認：${errs.join('、')}`);
+
     const { ref } = await getRef();
     const input = toCalcInput(b);
-    const c = P.calculate(ref, input); // 伺服器端重算，不信任前端金額
+    const c = P.calcAny(ref, input); // 伺服器端重算，不信任前端金額
+    const isFire = c.kind === 'FIRE';
     const saved = await db.saveQuote({
-      quote_no: b.quoteNo || null,
+      quote_no: existing?.quote_no || null,
       prev_quote_no: b.prevQuoteNo,
-      status: '報價',
+      plan_code: c.planCode,
+      status1: action === 'confirm' ? '已要保' : '報價中',
+      status2: existing?.status2 || '未繳費',
+      confirmed_at: action === 'confirm' ? new Date().toISOString() : null,
       location_zip: b.locationZip,
       total_floors: b.totalFloors || null,
       area_ping: b.areaPing || null,
@@ -110,17 +161,22 @@ const handlers = {
       structure_code: b.structureCode,
       roof_code: b.roofCode,
       grade_code: b.gradeCode,
-      decoration_per_ping: b.decorationPerPing || 0,
-      building_sum: c.buildingSum,
-      movable_auto_sum: c.movableAutoSum,
-      movable_add_sum: c.movableAddSum,
+      decoration_per_ping: isFire ? b.decorationPerPing || 0 : 0,
+      building_sum: isFire ? c.buildingSum : 0,
+      movable_auto_sum: isFire ? c.movableAutoSum : 0,
+      movable_add_sum: isFire ? c.movableAddSum : 0,
+      prop_sum: isFire ? 0 : c.propSum,
+      eq_already: isFire ? false : c.eqAlready,
+      coverages: isFire ? null : c.selections,
+      lines: c.lines,
       eq_sum: c.eqSum,
       fire_premium: c.firePremium,
       eq_premium: c.eqPremium,
+      home_premium: c.homePremium,
       total_premium: c.totalPremium,
       calc_detail: c.detail,
-      insured: { ...b.insured, id_no: String(b.insured.id_no).toUpperCase() },
-      applicant: b.applicant,
+      insured: { ...b.insured, id_no: String(b.insured?.id_no || '').toUpperCase() },
+      applicant: { ...b.applicant, id_no: String(b.applicant?.id_no || '').toUpperCase() },
       property_zip: b.propertyZip,
       property_addr: b.propertyAddr,
       mail_zip: b.mailZip,
@@ -135,31 +191,22 @@ const handlers = {
   },
 
   /**
-   * 一次性初始化資料庫：瀏覽器開 /api/init
-   * - 資料庫還沒有資料時，任何人可執行一次
-   * - 已初始化過再執行，需帶 ?token=（Vercel 環境變數 INIT_TOKEN），避免被他人重跑
+   * 建立／更新資料表＋寫入種子資料：瀏覽器開 /api/init
+   * 可重複執行、不會刪除資料；費率類資料若已存在不覆蓋（保留在 DB 調整過的費率）
+   * 每次部署新版（資料表有變動）後執行一次即可
    */
-  async init({ query }) {
+  async init() {
     if (!db.usingDb()) throw new HttpError(400, '尚未設定 DATABASE_URL：請先在 Neon 資料庫頁按 Connect to Project 連到此 Vercel 專案，並 Redeploy');
-    let initialized = false;
-    try {
-      const r = await db.exec('SELECT count(*)::int AS n FROM zip_codes');
-      initialized = r.rows[0].n > 0;
-    } catch (_) { /* 資料表不存在 → 尚未初始化 */ }
-    if (initialized) {
-      const token = process.env.INIT_TOKEN;
-      if (!token || query.token !== token) {
-        return ok({ ok: true, message: '資料庫已初始化過，不需再執行。（如需重灌種子資料，請設定 INIT_TOKEN 環境變數並以 ?token= 呼叫）' });
-      }
-    }
     await db.exec(SCHEMA);
     await db.exec(buildSeedSql());
     cache = null;
     const r = await db.exec(`SELECT
       (SELECT count(*) FROM zip_codes)::int AS zips,
-      (SELECT count(*) FROM building_costs)::int AS costs,
-      (SELECT count(*) FROM building_grades)::int AS grades`);
-    return ok({ ok: true, message: '✔ 資料表建立完成、種子資料寫入完成', counts: r.rows[0] });
+      (SELECT count(*) FROM plans)::int AS plans,
+      (SELECT count(*) FROM coverages)::int AS coverages,
+      (SELECT count(*) FROM coverage_premiums)::int AS coverage_premiums,
+      (SELECT count(*) FROM quotes WHERE deleted_at IS NULL)::int AS quotes`);
+    return ok({ ok: true, message: '✔ 資料表建立／更新完成、種子資料寫入完成', counts: r.rows[0] });
   },
 };
 

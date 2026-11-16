@@ -159,7 +159,87 @@ const NATIONALITIES = [
   ['840', '美國'], ['124', '加拿大'], ['826', '英國'], ['276', '德國'], ['250', '法國'], ['036', '澳洲'], ['554', '紐西蘭'],
 ];
 
+// ═════════════ 居家綜合保險 ═════════════
+// 費率依「保費試算畫面」反推（財損 500 萬、臺北市、7 層、特二），
+// 標 estimated=true 者為依比例推估、尚待公司費率表確認，可直接在 DB 修改。
+
+// 投保方案：財物損害保費 = prop_base_fee + 保額 × prop_rate(‰)
+const PLANS = [
+  { code: 'HF', name: '住宅火災及地震基本保險', kind: 'FIRE', prop_label: null, prop_base_fee: 0, prop_rate: 0, sort: 1 },
+  { code: 'HA', name: '居家綜合險A式', kind: 'HOME', prop_label: '財物損害保險(動產)-基本保障', prop_base_fee: 0, prop_rate: 0.239, sort: 2 },
+  // B 式有兩個資料點（300 萬 1,656 元；500 萬 1,874 元）→ 固定 1,329 + 0.109‰
+  { code: 'HB', name: '居家綜合險B式', kind: 'HOME', prop_label: '財物損害保險(動產)-基本保障、竊盜', prop_base_fee: 1329, prop_rate: 0.109, sort: 3 },
+  { code: 'HC', name: '居家綜合險C式', kind: 'HOME', prop_label: '財物損害保險(動產)-基本保障、颱風及洪水', prop_base_fee: 0, prop_rate: 0.6736, sort: 4 },
+];
+const HOME_PLANS = ['HA', 'HB', 'HC'];
+
+// 險種：calc = TABLE（依方案＋選項查表）/ RATE_PROP（保額跟財損保額，保額 × 費率‰）
+const COVERAGES = [
+  { code: 'TPL', name: '第三人責任險', sum_label: '每一事故體傷死亡及財損/保險期間最高賠償金額', calc: 'TABLE', required: true, default_on: true, sort: 0 },
+  { code: 'PA', name: '傷害保險', sum_label: '每一人死亡失能/每一事故限額', calc: 'TABLE', required: false, default_on: true, sort: 1 },
+  { code: 'LEQ', name: '輕損地震保險', sum_label: '', calc: 'TABLE', required: false, default_on: true, sort: 2 },
+  { code: 'PET', name: '寵物意外費用補償', sum_label: '', calc: 'TABLE', required: false, default_on: true, sort: 3 },
+  { code: 'RFL', name: '承租人火災責任', sum_label: '', calc: 'TABLE', required: false, default_on: false, sort: 4 },
+  { code: 'CON', name: '第三人責任保險住院及身故慰問金', sum_label: '', calc: 'TABLE', required: false, default_on: false, sort: 5 },
+  { code: 'HSK', name: '家事代勞費用附加保險', sum_label: '', calc: 'TABLE', required: false, default_on: false, sort: 6 },
+  { code: 'GRN', name: '綠能升級費用附加保險', sum_label: '', calc: 'RATE_PROP', required: false, default_on: false, sort: 7 },
+];
+
+// 選項與保費：[選項(萬元), 預設?, {方案: 保費}, 是否推估]
+const per = (o) => ({ HA: o.HA ?? o.all, HB: o.HB ?? o.all, HC: o.HC ?? o.all });
+const COVERAGE_TABLE = {
+  TPL: [['200/400', true, per({ all: 0 }), false]],
+  PA: [
+    ['50/200', false, per({ HA: 142, HB: 156, HC: 156 }), true],
+    ['100/400', true, per({ HA: 283, HB: 311, HC: 311 }), false],
+    ['200/800', false, per({ HA: 566, HB: 622, HC: 622 }), true],
+    ['300/1200', false, per({ HA: 849, HB: 933, HC: 933 }), true],
+  ],
+  LEQ: [
+    ['5', true, per({ all: 34 }), false],
+    ['10', false, per({ all: 68 }), true],
+    ['15', false, per({ all: 102 }), true],
+    ['20', false, per({ all: 136 }), true],
+    ['30', false, per({ all: 204 }), true],
+  ],
+  PET: [
+    ['1', true, per({ HA: 31, HB: 47, HC: 76 }), false],
+    ['2', false, per({ HA: 62, HB: 94, HC: 152 }), true],
+  ],
+  RFL: [
+    ['50', false, per({ all: 158 }), true],
+    ['100', true, per({ all: 315 }), false],
+    ['200', false, per({ all: 630 }), true],
+    ['300', false, per({ all: 945 }), true],
+  ],
+  CON: [['1/10', true, per({ all: 1 }), false]],
+  HSK: [
+    ['0.1', false, per({ all: 21 }), true],
+    ['0.2', true, per({ all: 41 }), false],
+    ['0.3', false, per({ all: 62 }), true],
+  ],
+};
+// RATE_PROP 險種費率（‰）
+const COVERAGE_RATES = { GRN: { HA: 0.027, HB: 0.016, HC: 0.027 } };
+
+const COVERAGE_OPTIONS = [];
+const COVERAGE_PREMIUMS = [];
+for (const [cov, list] of Object.entries(COVERAGE_TABLE)) {
+  list.forEach(([value, isDefault, prem, estimated], i) => {
+    COVERAGE_OPTIONS.push({ coverage_code: cov, value, is_default: isDefault, sort: i + 1 });
+    for (const plan of HOME_PLANS) {
+      COVERAGE_PREMIUMS.push({ plan_code: plan, coverage_code: cov, value, premium: prem[plan], estimated });
+    }
+  });
+}
+const COVERAGE_RATE_ROWS = Object.entries(COVERAGE_RATES).flatMap(([cov, m]) =>
+  Object.entries(m).map(([plan, rate]) => ({ plan_code: plan, coverage_code: cov, rate })));
+
+const STATUS1 = ['報價中', '已要保', '已出單'];
+const STATUS2 = ['未繳費', '已繳費', '已銷帳'];
+
 module.exports = {
+  PLANS, COVERAGES, COVERAGE_OPTIONS, COVERAGE_PREMIUMS, COVERAGE_RATE_ROWS, STATUS1, STATUS2,
   COST_REGIONS, COUNTY_REGION, BUILDING_COST_VERSION, BUILDING_COSTS,
   STRUCTURES, ROOFS, GRADES, SHORT_RATES, SETTINGS, BANKS, ZIPS, NATIONALITIES,
 };

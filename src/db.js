@@ -18,7 +18,8 @@ function usingDb() {
 
 function getPool() {
   if (!pool) {
-    const { Pool } = require('pg');
+    const { Pool, types } = require('pg');
+    types.setTypeParser(1082, (v) => v); // DATE 以 'YYYY-MM-DD' 字串回傳，避免時區位移
     const url = dbUrl();
     pool = new Pool({
       connectionString: url,
@@ -53,9 +54,17 @@ async function loadRefData() {
       settings: Object.fromEntries(Object.entries(R.SETTINGS).map(([k, v]) => [k, String(v)])),
       banks: R.BANKS.map(([code, name]) => ({ code, name })),
       nationalities: R.NATIONALITIES.map(([code, name]) => ({ code, name })),
+      plans: R.PLANS,
+      coverages: R.COVERAGES,
+      coverageOptions: R.COVERAGE_OPTIONS,
+      coveragePremiums: R.COVERAGE_PREMIUMS,
+      coverageRates: R.COVERAGE_RATE_ROWS,
+      status1: R.STATUS1,
+      status2: R.STATUS2,
     };
   }
-  const [zips, costs, structures, roofs, grades, shortRates, settings, banks, nationalities] = await Promise.all([
+  const [zips, costs, structures, roofs, grades, shortRates, settings, banks, nationalities,
+    plans, coverages, coverageOptions, coveragePremiums, coverageRates] = await Promise.all([
     q('SELECT zip, county, district, cost_region FROM zip_codes ORDER BY zip'),
     q(`SELECT version, floor_min, floor_max, cost_region, price_per_ping FROM building_costs
        WHERE version = (SELECT max(version) FROM building_costs) ORDER BY floor_min, cost_region`),
@@ -66,11 +75,19 @@ async function loadRefData() {
     q('SELECT key, value FROM settings'),
     q('SELECT code, name FROM banks ORDER BY code'),
     q('SELECT code, name FROM nationalities ORDER BY CASE WHEN code = \'158\' THEN 0 ELSE 1 END, code'),
+    q('SELECT code, name, kind, prop_label, prop_base_fee::float, prop_rate::float, sort FROM plans WHERE active ORDER BY sort'),
+    q('SELECT code, name, sum_label, calc, required, default_on, sort FROM coverages WHERE active ORDER BY sort'),
+    q('SELECT coverage_code, value, is_default, sort FROM coverage_options ORDER BY coverage_code, sort'),
+    q('SELECT plan_code, coverage_code, value, premium::float, estimated FROM coverage_premiums'),
+    q('SELECT plan_code, coverage_code, rate::float FROM coverage_rates'),
   ]);
   return {
     zips, costs, structures, roofs, grades, shortRates,
     settings: Object.fromEntries(settings.map((s) => [s.key, s.value])),
     banks, nationalities,
+    plans, coverages, coverageOptions, coveragePremiums, coverageRates,
+    status1: R.STATUS1,
+    status2: R.STATUS2,
   };
 }
 
@@ -93,10 +110,11 @@ async function nextQuoteNo() {
 }
 
 const COLS = [
-  'quote_no', 'prev_quote_no', 'status', 'location_zip', 'total_floors', 'area_ping', 'build_year',
+  'quote_no', 'prev_quote_no', 'plan_code', 'status1', 'status2', 'location_zip', 'total_floors', 'area_ping', 'build_year',
   'structure_code', 'roof_code', 'grade_code', 'decoration_per_ping',
   'building_sum', 'movable_auto_sum', 'movable_add_sum', 'eq_sum',
-  'fire_premium', 'eq_premium', 'total_premium', 'calc_detail',
+  'prop_sum', 'eq_already', 'coverages', 'lines', 'confirmed_at',
+  'fire_premium', 'eq_premium', 'home_premium', 'total_premium', 'calc_detail',
   'insured', 'applicant', 'property_zip', 'property_addr', 'mail_zip', 'mail_addr',
   'period_start', 'period_end', 'period_months', 'mortgagee_bank', 'mortgagee_name',
 ];
@@ -124,27 +142,69 @@ async function saveQuote(rec) {
 }
 
 async function getQuote(quoteNo) {
-  if (!usingDb()) return mem.quotes.get(quoteNo) || null;
-  const rows = await q('SELECT * FROM quotes WHERE quote_no = $1', [quoteNo]);
+  if (!usingDb()) {
+    const r = mem.quotes.get(quoteNo);
+    return r && !r.deleted_at ? r : null;
+  }
+  const rows = await q('SELECT * FROM quotes WHERE quote_no = $1 AND deleted_at IS NULL', [quoteNo]);
   return rows[0] || null;
 }
 
-/** 依要保號碼或被保險人身分證/統編，找最近一筆（載入前期資料用） */
+/** 依報價單號或被保險人身分證/統編，找最近一筆（載入前期資料用） */
 async function findLatest(keyword) {
   if (!usingDb()) {
-    const list = [...mem.quotes.values()].filter((x) => x.quote_no === keyword || x.insured?.id_no === keyword);
+    const list = [...mem.quotes.values()].filter((x) => !x.deleted_at && (x.quote_no === keyword || x.insured?.id_no === keyword));
     return list.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] || null;
   }
   const rows = await q(
-    `SELECT * FROM quotes WHERE quote_no = $1 OR insured->>'id_no' = $1
+    `SELECT * FROM quotes WHERE deleted_at IS NULL AND (quote_no = $1 OR insured->>'id_no' = $1)
      ORDER BY created_at DESC LIMIT 1`, [keyword]);
   return rows[0] || null;
 }
 
-async function listQuotes(limit = 50) {
-  if (!usingDb()) return [...mem.quotes.values()].slice(-limit).reverse();
-  return q(`SELECT quote_no, status, insured->>'name' AS insured_name, total_premium, created_at
-            FROM quotes ORDER BY created_at DESC LIMIT $1`, [limit]);
+/** 查詢一覽表：關鍵字（報價單號 / 要保人姓名 / 要保人或被保險人 ID）＋狀態篩選 */
+async function listQuotes({ kw = '', status1 = '', status2 = '', limit = 200 } = {}) {
+  const k = String(kw).trim();
+  if (!usingDb()) {
+    const K = k.toUpperCase();
+    return [...mem.quotes.values()]
+      .filter((x) => !x.deleted_at)
+      .filter((x) => !k || x.quote_no.includes(K) || (x.applicant?.name || '').includes(k)
+        || (x.applicant?.id_no || '').toUpperCase() === K || (x.insured?.id_no || '').toUpperCase() === K)
+      .filter((x) => !status1 || x.status1 === status1)
+      .filter((x) => !status2 || x.status2 === status2)
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+      .slice(0, limit)
+      .map((x) => ({
+        quote_no: x.quote_no, plan_code: x.plan_code, applicant_name: x.applicant?.name || '',
+        period_start: x.period_start, period_end: x.period_end,
+        fire_premium: x.fire_premium, eq_premium: x.eq_premium, home_premium: x.home_premium,
+        total_premium: x.total_premium, status1: x.status1, status2: x.status2, created_at: x.created_at,
+      }));
+  }
+  return q(
+    `SELECT quote_no, plan_code, applicant->>'name' AS applicant_name,
+            to_char(period_start, 'YYYY-MM-DD') AS period_start, to_char(period_end, 'YYYY-MM-DD') AS period_end,
+            fire_premium, eq_premium, home_premium, total_premium, status1, status2, created_at
+       FROM quotes
+      WHERE deleted_at IS NULL
+        AND ($1 = '' OR quote_no ILIKE '%' || $1 || '%' OR applicant->>'name' ILIKE '%' || $1 || '%'
+             OR upper(applicant->>'id_no') = upper($1) OR upper(insured->>'id_no') = upper($1))
+        AND ($2 = '' OR status1 = $2)
+        AND ($3 = '' OR status2 = $3)
+      ORDER BY created_at DESC
+      LIMIT $4`, [k, status1, status2, limit]);
 }
 
-module.exports = { exec, usingDb, loadRefData, saveQuote, getQuote, findLatest, listQuotes, nextQuoteNo };
+/** 刪除（軟刪除，資料保留） */
+async function deleteQuote(quoteNo) {
+  if (!usingDb()) {
+    const r = mem.quotes.get(quoteNo);
+    if (r) r.deleted_at = new Date().toISOString();
+    return Boolean(r);
+  }
+  const rows = await q('UPDATE quotes SET deleted_at = now() WHERE quote_no = $1 AND deleted_at IS NULL RETURNING quote_no', [quoteNo]);
+  return rows.length > 0;
+}
+
+module.exports = { exec, usingDb, loadRefData, saveQuote, getQuote, findLatest, listQuotes, deleteQuote, nextQuoteNo };

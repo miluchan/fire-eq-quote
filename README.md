@@ -1,4 +1,4 @@
-# 住宅火災及地震基本保險 報價系統
+# 住火地震暨居家綜合保險 報價系統
 
 Vercel（靜態頁＋Serverless Functions）＋ Neon PostgreSQL。畫面依「報價／承保內容／試算結果／要保書填寫」版面製作。
 
@@ -39,13 +39,13 @@ fire-eq-quote/
 2. 選剛建立的 Vercel 專案；Environments 全勾（Development / Preview / Production）；**Custom Prefix 留空**（變數名才會是 `DATABASE_URL`）→ **Connect**
 3. 回到專案 → **Deployments** → 最新一筆右側 **⋯ → Redeploy**（環境變數要重新部署才生效）
 
-### 4. 初始化資料庫（只做一次）
+### 4. 初始化／更新資料庫（第一次部署，以及每次資料表有變動的新版部署後）
 瀏覽器開：
 ```
 https://你的專案網址.vercel.app/api/init
 ```
-看到 `✔ 資料表建立完成、種子資料寫入完成`、`zips: 365` 即成功。
-（已初始化過再開，只會回覆「已初始化過」，不會重灌。）
+看到 `✔ 資料表建立／更新完成`、`plans: 4`、`coverages: 8` 即成功。
+可重複執行，不會刪除報價單；已在 DB 改過的費率不會被覆蓋。
 
 ### 5. 使用
 開 `https://你的專案網址.vercel.app/`，右上角顯示綠色 **Neon DB** 即完成。
@@ -129,6 +129,34 @@ npm test
 - 地震 min(339 萬, 150 萬) = 150 萬 → **1,350 元**
 - 總保費 **2,937 元**；自動附加動產 80 萬
 
+### 6. 居家綜合保險（HA / HB / HC）
+```
+財物損害保費 = 方案固定費 + 財損保額 × 方案費率‰              （不分建築等級）
+第三人責任   = 依選項查表（200/400 萬 → 0 元，含於財物損害保險內）
+附加險       = 依「方案 × 險種 × 選項」查表；綠能升級 = 財損保額 × 方案費率‰（保額跟財損保額，不可改）
+基本地震     = 同住火規則；勾選「已投保住宅地震險」則不計
+各項 × 短期費率%（居家用火險短期表、地震用地震短期表）
+```
+
+| 方案 | 財物損害 | 依據 |
+|---|---|---|
+| HA 居家綜合險A式（基本保障） | 0.239‰ | 500 萬 = 1,195 元 |
+| HB 居家綜合險B式（基本保障、竊盜） | 1,329 元 + 0.109‰ | 300 萬 = 1,656、500 萬 = 1,874 |
+| HC 居家綜合險C式（基本保障、颱風及洪水） | 0.6736‰ | 500 萬 = 3,368 元 |
+
+| 附加險（預設選項） | A式 | B式 | C式 |
+|---|---:|---:|---:|
+| 傷害保險 100/400 萬（每人/每事故，全家） | 283 | 311 | 311 |
+| 輕損地震保險 5 萬 | 34 | 34 | 34 |
+| 寵物意外費用補償 1 萬 | 31 | 47 | 76 |
+| 承租人火災責任 100 萬 | 315 | 315 | 315 |
+| 第三人責任住院及身故慰問金 1/10 萬 | 1 | 1 | 1 |
+| 家事代勞費用 0.2 萬 | 41 | 41 | 41 |
+| 綠能升級（‰ × 財損保額） | 0.027‰ | 0.016‰ | 0.027‰ |
+
+> 上表數字由參考系統試算畫面反推，測試案例已驗證 A/B/C 三張截圖總保費 2,035 / 2,703 / 4,281 元完全相符。
+> 其他選項（例：傷害 200/800、輕損 10 萬）依比例推估，資料表 `coverage_premiums.estimated = true`，待公司費率表確認後直接改 DB。
+
 ---
 
 ## 三、資料表
@@ -144,7 +172,12 @@ npm test
 | `settings` | 地震上限/保費、動產附加比例/上限、費率係數、裝潢選項… |
 | `banks` | 抵押權人銀行代號 |
 | `nationalities` | 國籍代碼 |
-| `quotes` | 報價/要保書（要保人、被保險人為 JSONB；保額保費由伺服器重算後存檔） |
+| `plans` | 投保方案（HF 住火 / HA~HC 居家）、財損固定費與費率 |
+| `coverages` | 險種（第三人責任、各附加險）、計費方式、預設勾選 |
+| `coverage_options` | 險種下拉選項（萬元） |
+| `coverage_premiums` | 方案 × 險種 × 選項 保費（`estimated` 標示推估值） |
+| `coverage_rates` | 依保額計費的險種費率‰（綠能升級） |
+| `quotes` | 報價單：方案、狀態1（報價中/已要保/已出單）、狀態2（未繳費/已繳費/已銷帳）、住火/地震/居家保費、試算明細；預留 policy_no / issued_at / paid_at；刪除為軟刪除 |
 | `quote_seq` | 要保號碼每日流水號（H + 民國年月日 + 4 碼） |
 
 
@@ -156,13 +189,27 @@ npm test
 | GET | `/api/refdata` | 下拉選單與費率表（快取 60 秒，改 DB 費率後最多 1 分鐘生效） |
 | POST | `/api/suggest` | 建議保額 |
 | POST | `/api/calc` | 保費計算 |
-| GET | `/api/quotes?q=要保號碼或身分證` | 載入前期資料（最近一筆） |
-| GET | `/api/quotes?no=要保號碼` | 讀取報價 |
-| GET | `/api/quotes` | 最近 50 筆報價 |
-| POST | `/api/quotes` | 儲存要保書（伺服器端重算保費） |
-| GET | `/api/init` | 一次性建立資料表＋種子資料；重灌需設定 `INIT_TOKEN` 並帶 `?token=` |
+| GET | `/api/quotes?q=報價單號或身分證` | 載入前期資料（最近一筆） |
+| GET | `/api/quotes?no=報價單號` | 讀取報價單 |
+| GET | `/api/quotes?kw=&status1=&status2=` | 查詢一覽表 |
+| POST | `/api/quotes` | `action: save` 儲存報價單／`confirm` 確認要保（伺服器端重算保費；非報價中不可改） |
+| DELETE | `/api/quotes?no=報價單號` | 刪除（僅報價中，軟刪除） |
+| GET | `/api/init` | 建立／更新資料表＋種子資料（可重複執行） |
 
 ## 五、修改費率
+
+居家綜合險：
+```sql
+-- 財損費率
+UPDATE plans SET prop_base_fee = 0, prop_rate = 0.25 WHERE code = 'HA';
+-- 附加險保費（例：B式 傷害 200/800 萬）
+UPDATE coverage_premiums SET premium = 600, estimated = false WHERE plan_code='HB' AND coverage_code='PA' AND value='200/800';
+-- 新增選項（例：第三人責任 300/600 萬，三方案各加費 150 元）
+INSERT INTO coverage_options VALUES ('TPL','300/600',false,2);
+INSERT INTO coverage_premiums VALUES ('HA','TPL','300/600',150,false),('HB','TPL','300/600',150,false),('HC','TPL','300/600',150,false);
+```
+
+住火：
 在 Neon（Vercel Storage → Open in Neon → Tables 或 SQL Editor）直接改：
 ```sql
 -- 改成公司報備費率（每千元）

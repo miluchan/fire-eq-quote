@@ -560,4 +560,114 @@ INSERT INTO nationalities (code, name) VALUES
   ('554', '紐西蘭')
 ON CONFLICT (code) DO UPDATE SET name=EXCLUDED.name;
 
+INSERT INTO plans (code, name, kind, prop_label, prop_base_fee, prop_rate, sort) VALUES
+  ('HF', '住宅火災及地震基本保險', 'FIRE', NULL, 0, 0, 1),
+  ('HA', '居家綜合險A式', 'HOME', '財物損害保險(動產)-基本保障', 0, 0.239, 2),
+  ('HB', '居家綜合險B式', 'HOME', '財物損害保險(動產)-基本保障、竊盜', 1329, 0.109, 3),
+  ('HC', '居家綜合險C式', 'HOME', '財物損害保險(動產)-基本保障、颱風及洪水', 0, 0.6736, 4)
+ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO coverages (code, name, sum_label, calc, required, default_on, sort) VALUES
+  ('TPL', '第三人責任險', '每一事故體傷死亡及財損/保險期間最高賠償金額', 'TABLE', true, true, 0),
+  ('PA', '傷害保險', '每一人死亡失能/每一事故限額', 'TABLE', false, true, 1),
+  ('LEQ', '輕損地震保險', '', 'TABLE', false, true, 2),
+  ('PET', '寵物意外費用補償', '', 'TABLE', false, true, 3),
+  ('RFL', '承租人火災責任', '', 'TABLE', false, false, 4),
+  ('CON', '第三人責任保險住院及身故慰問金', '', 'TABLE', false, false, 5),
+  ('HSK', '家事代勞費用附加保險', '', 'TABLE', false, false, 6),
+  ('GRN', '綠能升級費用附加保險', '', 'RATE_PROP', false, false, 7)
+ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO coverage_options (coverage_code, value, is_default, sort) VALUES
+  ('TPL', '200/400', true, 1),
+  ('PA', '50/200', false, 1),
+  ('PA', '100/400', true, 2),
+  ('PA', '200/800', false, 3),
+  ('PA', '300/1200', false, 4),
+  ('LEQ', '5', true, 1),
+  ('LEQ', '10', false, 2),
+  ('LEQ', '15', false, 3),
+  ('LEQ', '20', false, 4),
+  ('LEQ', '30', false, 5),
+  ('PET', '1', true, 1),
+  ('PET', '2', false, 2),
+  ('RFL', '50', false, 1),
+  ('RFL', '100', true, 2),
+  ('RFL', '200', false, 3),
+  ('RFL', '300', false, 4),
+  ('CON', '1/10', true, 1),
+  ('HSK', '0.1', false, 1),
+  ('HSK', '0.2', true, 2),
+  ('HSK', '0.3', false, 3)
+ON CONFLICT (coverage_code, value) DO NOTHING;
+
+INSERT INTO coverage_premiums (plan_code, coverage_code, value, premium, estimated) VALUES
+  ('HA', 'TPL', '200/400', 0, false),
+  ('HB', 'TPL', '200/400', 0, false),
+  ('HC', 'TPL', '200/400', 0, false),
+  ('HA', 'PA', '50/200', 142, true),
+  ('HB', 'PA', '50/200', 156, true),
+  ('HC', 'PA', '50/200', 156, true),
+  ('HA', 'PA', '100/400', 283, false),
+  ('HB', 'PA', '100/400', 311, false),
+  ('HC', 'PA', '100/400', 311, false),
+  ('HA', 'PA', '200/800', 566, true),
+  ('HB', 'PA', '200/800', 622, true),
+  ('HC', 'PA', '200/800', 622, true),
+  ('HA', 'PA', '300/1200', 849, true),
+  ('HB', 'PA', '300/1200', 933, true),
+  ('HC', 'PA', '300/1200', 933, true),
+  ('HA', 'LEQ', '5', 34, false),
+  ('HB', 'LEQ', '5', 34, false),
+  ('HC', 'LEQ', '5', 34, false),
+  ('HA', 'LEQ', '10', 68, true),
+  ('HB', 'LEQ', '10', 68, true),
+  ('HC', 'LEQ', '10', 68, true),
+  ('HA', 'LEQ', '15', 102, true),
+  ('HB', 'LEQ', '15', 102, true),
+  ('HC', 'LEQ', '15', 102, true),
+  ('HA', 'LEQ', '20', 136, true),
+  ('HB', 'LEQ', '20', 136, true),
+  ('HC', 'LEQ', '20', 136, true),
+  ('HA', 'LEQ', '30', 204, true),
+  ('HB', 'LEQ', '30', 204, true),
+  ('HC', 'LEQ', '30', 204, true),
+  ('HA', 'PET', '1', 31, false),
+  ('HB', 'PET', '1', 47, false),
+  ('HC', 'PET', '1', 76, false),
+  ('HA', 'PET', '2', 62, true),
+  ('HB', 'PET', '2', 94, true),
+  ('HC', 'PET', '2', 152, true),
+  ('HA', 'RFL', '50', 158, true),
+  ('HB', 'RFL', '50', 158, true),
+  ('HC', 'RFL', '50', 158, true),
+  ('HA', 'RFL', '100', 315, false),
+  ('HB', 'RFL', '100', 315, false),
+  ('HC', 'RFL', '100', 315, false),
+  ('HA', 'RFL', '200', 630, true),
+  ('HB', 'RFL', '200', 630, true),
+  ('HC', 'RFL', '200', 630, true),
+  ('HA', 'RFL', '300', 945, true),
+  ('HB', 'RFL', '300', 945, true),
+  ('HC', 'RFL', '300', 945, true),
+  ('HA', 'CON', '1/10', 1, false),
+  ('HB', 'CON', '1/10', 1, false),
+  ('HC', 'CON', '1/10', 1, false),
+  ('HA', 'HSK', '0.1', 21, true),
+  ('HB', 'HSK', '0.1', 21, true),
+  ('HC', 'HSK', '0.1', 21, true),
+  ('HA', 'HSK', '0.2', 41, false),
+  ('HB', 'HSK', '0.2', 41, false),
+  ('HC', 'HSK', '0.2', 41, false),
+  ('HA', 'HSK', '0.3', 62, true),
+  ('HB', 'HSK', '0.3', 62, true),
+  ('HC', 'HSK', '0.3', 62, true)
+ON CONFLICT (plan_code, coverage_code, value) DO NOTHING;
+
+INSERT INTO coverage_rates (plan_code, coverage_code, rate) VALUES
+  ('HA', 'GRN', 0.027),
+  ('HB', 'GRN', 0.016),
+  ('HC', 'GRN', 0.027)
+ON CONFLICT (plan_code, coverage_code) DO NOTHING;
+
 COMMIT;

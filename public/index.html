@@ -3,34 +3,53 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>住宅火災及地震基本保險 報價系統</title>
+<title>住火地震暨居家綜合保險 報價系統</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+
+<!-- ═════════════ 系統標題列 ═════════════ -->
+<header class="topbar">
+  <h1>住火地震暨居家綜合保險</h1>
+  <div class="top-actions">
+    <span id="dbBadge" class="badge"></span>
+    <button type="button" id="btnClear">清除畫面</button>
+    <button type="button" id="btnQuery">查詢報價單</button>
+    <button type="button" id="btnPrint">列印報價單</button>
+  </div>
+</header>
+
 <form id="f" class="sheet" autocomplete="off" onsubmit="return false">
+
+  <div id="printInfo" class="print-only"></div>
+  <div id="modeBanner" class="mode-banner hidden"></div>
 
   <!-- ═════════════ 報價 ═════════════ -->
   <div class="bar-main">報價</div>
   <table class="grid">
     <colgroup><col style="width:15%"><col></colgroup>
     <tr>
-      <th>要保號碼</th>
+      <th>報價單號</th>
       <td>
         <input id="quoteNo" class="w12" readonly placeholder="儲存後自動產生">
-        <span class="muted">前期要保號碼</span> <input id="prevQuoteNo" class="w12" readonly>
-        <span id="dbBadge" class="badge"></span>
+        <span class="muted">前期保單號碼</span> <input id="prevQuoteNo" class="w12" readonly>
+        <span id="statusText" class="status-tags"></span>
       </td>
     </tr>
-    <tr>
+    <tr class="no-print">
       <th><button type="button" id="btnLoadPrev">載入前期資料</button></th>
-      <td><input id="loadKey" class="w30"placeholder="輸入前期要保號碼或被保險人身分證統編"></td>
+      <td><input id="loadKey" class="w30" placeholder="輸入前期報價單號或被保險人身分證統編"></td>
     </tr>
   </table>
 
   <div class="bar-sub">承保內容</div>
   <table class="grid">
     <colgroup><col style="width:15%"><col></colgroup>
+    <tr>
+      <th>投保方案</th>
+      <td><select id="planCode" class="w30"></select></td>
+    </tr>
     <tr>
       <th>標的物所在地</th>
       <td><select id="locationZip" class="zip-select"></select>
@@ -45,7 +64,7 @@
       <td>
         <input id="areaPing" class="num w6" inputmode="decimal"> 坪
         (坪數換算等：<input id="areaM2" class="num w6" inputmode="decimal"> 平方公尺
-        <button type="button" id="btnConvert">查詢</button>)
+        <button type="button" id="btnConvert" class="no-print">查詢</button>)
         <span class="muted">含公共設施</span>
       </td>
     </tr>
@@ -62,7 +81,9 @@
         <span id="gradeHint" class="muted"></span>
       </td>
     </tr>
-    <tr>
+
+    <!-- 住宅火災及地震基本保險 -->
+    <tr class="fire-only">
       <th>不動產保額</th>
       <td>
         <input id="buildingSumWan" class="num w8" inputmode="numeric" value="0"> 萬元
@@ -72,39 +93,47 @@
         加保動產 <input id="movableAddWan" class="num w6" inputmode="numeric" value="0"> 萬元
       </td>
     </tr>
+
+    <!-- 居家綜合保險 -->
+    <tr class="home-only">
+      <th>財物損害保險保額</th>
+      <td>
+        <input id="propSumWan" class="num w8" inputmode="numeric" value="0"> 萬元
+        <label class="ml"><input type="checkbox" id="eqAlready"> 已投保住宅地震險</label>
+      </td>
+    </tr>
+    <tr class="home-only">
+      <th>第三人責任險</th>
+      <td><select id="cov_TPL_value" class="w12"></select> 萬元</td>
+    </tr>
+  </table>
+
+  <!-- 附加險（依資料表動態產生） -->
+  <table class="grid riders home-only" id="riderTable">
+    <colgroup><col style="width:43%"><col></colgroup>
+    <tbody id="riderBody"></tbody>
   </table>
 
   <div class="bar-sub">試算結果</div>
   <table class="grid result">
-    <colgroup><col style="width:15%"><col style="width:20%"><col><col style="width:15%"><col style="width:9%"></colgroup>
-    <tr class="head">
-      <th>保險標的</th><th>投保險種</th><th>保險金額</th><th>保險費</th><th>總保險費</th>
-    </tr>
-    <tr>
-      <th rowspan="3" class="target">住宅火災暨<br>地震保險</th>
-      <td>住宅火災保險</td>
-      <td class="r">不動產 <b id="rBuilding">0</b> 萬元　加保動產 <b id="rMovableAdd">0</b> 萬元
-        <div class="muted small">自動附加動產 <span id="rMovableAuto">0</span> 萬元（免費）</div></td>
-      <td class="r"><b id="rFire" class="money">0</b> 元</td>
-      <td rowspan="3" class="r total"><b id="rTotal" class="money">0</b> 元</td>
-    </tr>
-    <tr>
-      <td>玻璃保險</td>
-      <td class="r"><span id="rGlass">1/2</span> 萬元</td>
-      <td class="r note">含於財物損害保險內</td>
-    </tr>
-    <tr>
-      <td>基本地震保險</td>
-      <td class="r"><b id="rEq">0</b> 萬元</td>
-      <td class="r"><b id="rEqPrem" class="money">0</b> 元</td>
-    </tr>
-    <tr>
-      <td colspan="3" id="calcDetail" class="detail muted"></td>
-      <td colspan="2" class="r btns">
-        <button type="button" id="btnSuggest" class="big">建議保額</button>
-        <button type="button" id="btnCalc" class="big">保費計算</button>
-      </td>
-    </tr>
+    <colgroup><col style="width:14%"><col style="width:24%"><col><col style="width:17%"><col style="width:10%"></colgroup>
+    <thead>
+      <tr class="head">
+        <th>保險標的</th><th>投保險種</th><th>保險金額</th><th>保險費</th><th>總保險費</th>
+      </tr>
+    </thead>
+    <tbody id="resultBody">
+      <tr><td colspan="5" class="muted center">請按「建議保額」或「保費計算」</td></tr>
+    </tbody>
+    <tfoot>
+      <tr>
+        <td colspan="3" id="calcDetail" class="detail muted"></td>
+        <td colspan="2" class="r btns no-print">
+          <button type="button" id="btnSuggest" class="big">建議保額</button>
+          <button type="button" id="btnCalc" class="big">保費計算</button>
+        </td>
+      </tr>
+    </tfoot>
   </table>
 
   <!-- ═════════════ 要保書填寫 ═════════════ -->
@@ -153,7 +182,7 @@
   <table class="grid person" data-who="applicant">
     <colgroup><col style="width:10%"><col style="width:23%"><col style="width:7%"><col style="width:12%"><col style="width:6%"><col style="width:22%"><col style="width:6%"><col></colgroup>
     <tr>
-      <th>要保人(投保人) <button type="button" id="btnSameInsured" class="small-btn">同上</button></th>
+      <th>要保人(投保人) <button type="button" id="btnSameInsured" class="small-btn no-print">同上</button></th>
       <td><input data-f="name" class="wfull"></td>
       <th>身分證統編</th>
       <td><input data-f="id_no" class="wfull upper" maxlength="10"></td>
@@ -192,7 +221,7 @@
       <td><select id="propertyZip" class="zip-select short"></select> <input id="propertyAddr" class="w30"></td>
     </tr>
     <tr>
-      <th>通訊地址<br><button type="button" id="btnSameAddr" class="small-btn">同上</button></th>
+      <th>通訊地址<br><button type="button" id="btnSameAddr" class="small-btn no-print">同上</button></th>
       <td><select id="mailZip" class="zip-select short"></select> <input id="mailAddr" class="w30">
         <label class="muted"><input type="checkbox" id="eDoc"> 同意以電子方式寄送保單及通知</label></td>
     </tr>
@@ -203,18 +232,47 @@
         <input id="periodMonths" class="num w2" readonly> 月</td>
     </tr>
     <tr>
-      <th>抵押權人<br><button type="button" id="btnBank" class="small-btn">銀行代號</button></th>
+      <th>抵押權人<br><button type="button" id="btnBank" class="small-btn no-print">銀行代號</button></th>
       <td><input id="mortgageeBank" class="w5" maxlength="3"> <input id="mortgageeName" class="w20">
         <select id="bankPicker" class="hidden"></select></td>
     </tr>
   </table>
 
-  <div class="actions">
+  <div class="actions no-print">
     <span id="msg" class="msg"></span>
-    <button type="button" id="btnNew">清除重填</button>
-    <button type="button" id="btnSave" class="primary">儲存要保書</button>
+    <button type="button" id="btnSave">儲存報價單</button>
+    <button type="button" id="btnConfirm" class="primary">確認要保</button>
   </div>
 </form>
+
+<!-- ═════════════ 查詢報價單 一覽表 ═════════════ -->
+<div id="queryModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="qmTitle">
+  <div class="modal-box">
+    <div class="modal-head">
+      <span id="qmTitle">查詢報價單</span>
+      <button type="button" class="modal-x" id="qmClose" aria-label="關閉">✕</button>
+    </div>
+    <div class="modal-filter">
+      關鍵字 <input id="qmKw" class="w20" placeholder="報價單號 / 要保人姓名 / 身分證統編">
+      狀態1 <select id="qmS1"><option value="">全部</option></select>
+      狀態2 <select id="qmS2"><option value="">全部</option></select>
+      <button type="button" id="qmSearch">查詢</button>
+      <span id="qmCount" class="muted"></span>
+    </div>
+    <div class="modal-body">
+      <table class="list">
+        <thead>
+          <tr>
+            <th>報價單號</th><th>要保人</th><th>起保日</th><th>到期日</th>
+            <th>住火保費</th><th>地震保費</th><th>居家保費</th><th>保費合計</th>
+            <th>狀態1</th><th>狀態2</th><th>查詢</th><th>修改</th><th>刪除</th>
+          </tr>
+        </thead>
+        <tbody id="qmBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
 
 <script src="/app.js"></script>
 </body>

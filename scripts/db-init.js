@@ -3,7 +3,7 @@
 require('../src/env');
 const { run } = require('../src/handlers');
 
-run('init', { method: 'POST', query: { token: process.env.INIT_TOKEN } }).then((r) => {
+run('init', { method: 'POST' }).then((r) => {
   console.log(r.status, r.data);
   process.exit(r.status === 200 ? 0 : 1);
 });

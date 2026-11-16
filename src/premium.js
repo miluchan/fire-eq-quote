@@ -34,6 +34,12 @@ function buildRef(raw) {
     grades: new Map(raw.grades.map((g) => [g.code, g])),
     shortRates: raw.shortRates, // [{product, months, pct}]
     settings,
+    // 居家綜合保險
+    plans: new Map((raw.plans || []).map((p) => [p.code, p])),
+    coverages: [...(raw.coverages || [])].sort((a, b) => a.sort - b.sort),
+    covOptions: raw.coverageOptions || [], // [{coverage_code, value, is_default, sort}]
+    covPremiums: new Map((raw.coveragePremiums || []).map((r) => [`${r.plan_code}|${r.coverage_code}|${r.value}`, r])),
+    covRates: new Map((raw.coverageRates || []).map((r) => [`${r.plan_code}|${r.coverage_code}`, Number(r.rate)])),
   };
 }
 
@@ -128,17 +134,8 @@ function calculate(ref, input) {
   const firePremium = round((fireAnnual * fireShort) / 100);
 
   // 基本地震保險（只保建築物，不含動產）
-  let eqBase = building;
-  let eqBasis = '不動產保額';
-  if (Number(input.areaPing) > 0 && input.structureCode && input.zip) {
-    try {
-      eqBase = suggest(ref, input).bodyCost;
-      eqBasis = '建築物本體造價';
-    } catch (_) { /* 資料不足時沿用不動產保額 */ }
-  }
-  const eqSum = building > 0 ? Math.min(Math.round(eqBase / WAN) * WAN, Number(st.eq_max_sum)) : 0;
-  const eqAnnual = (Number(st.eq_annual_premium) * eqSum) / Number(st.eq_max_sum);
-  const eqPremium = round((eqAnnual * eqShort) / 100);
+  const eq = basicEq(ref, input, building, eqShort);
+  const { eqSum, eqAnnual, eqPremium, eqBasis } = eq;
 
   return {
     buildingSum: building,
@@ -163,4 +160,130 @@ function calculate(ref, input) {
   };
 }
 
-module.exports = { buildRef, monthsBetween, shortPct, suggestGrade, suggest, calculate, unitPricePerPing };
+/** 住宅地震基本保險：保額 = min(建築物本體造價, 150 萬)；資料不足時以 fallback 保額代替 */
+function basicEq(ref, input, fallbackSum, eqShort) {
+  const st = ref.settings;
+  let eqBase = fallbackSum;
+  let eqBasis = '不動產保額';
+  if (Number(input.areaPing) > 0 && input.structureCode && input.zip) {
+    try {
+      eqBase = suggest(ref, input).bodyCost;
+      eqBasis = '建築物本體造價';
+    } catch (_) { /* 資料不足時沿用 fallback */ }
+  }
+  const eqSum = fallbackSum > 0 ? Math.min(Math.round(eqBase / WAN) * WAN, Number(st.eq_max_sum)) : 0;
+  const eqAnnual = (Number(st.eq_annual_premium) * eqSum) / Number(st.eq_max_sum);
+  return { eqSum, eqAnnual, eqPremium: round((eqAnnual * eqShort) / 100), eqBasis };
+}
+
+const wanText = (n) => `${(Number(n) / WAN).toLocaleString('zh-TW')} 萬元`;
+
+/** 居家綜合保險 */
+function calculateHome(ref, input) {
+  const plan = ref.plans.get(input.planCode);
+  if (!plan || plan.kind !== 'HOME') throw new Error('投保方案不存在');
+  const propSum = round(Number(input.propSumWan || 0) * WAN);
+  if (propSum <= 0) throw new Error('請輸入財物損害保險保額或按「建議保額」');
+
+  const months = Number(input.periodMonths) || 12;
+  const homeShort = shortPct(ref, 'FIRE', months);
+  const eqShort = shortPct(ref, 'EQ', months);
+  const apply = (annual) => round((annual * homeShort) / 100);
+  const sel = input.coverages || {};
+  const lines = [];
+  const selections = {};
+
+  // 1. 財物損害保險
+  const propAnnual = Number(plan.prop_base_fee) + (propSum * Number(plan.prop_rate)) / 1000;
+  const propPremium = apply(propAnnual);
+  lines.push({ code: 'PROP', name: plan.prop_label, sumText: wanText(propSum), premium: propPremium, annual: round(propAnnual) });
+  let homePremium = propPremium;
+
+  // 2. 基本地震（已在他張保單投保者不收）
+  let eq = { eqSum: 0, eqPremium: 0, eqAnnual: 0, eqBasis: null };
+  if (!input.eqAlready) {
+    eq = basicEq(ref, input, propSum, eqShort);
+    lines.push({ code: 'EQ', name: '基本地震保險', sumText: wanText(eq.eqSum), premium: eq.eqPremium, annual: round(eq.eqAnnual) });
+  }
+
+  // 3. 第三人責任 + 附加險
+  for (const cov of ref.coverages) {
+    const pick = sel[cov.code] || {};
+    const on = cov.required || Boolean(pick.on);
+    if (!on) continue;
+    let annual;
+    let sumText;
+    let value = null;
+    if (cov.calc === 'RATE_PROP') {
+      const rate = ref.covRates.get(`${plan.code}|${cov.code}`);
+      if (rate === undefined) throw new Error(`${cov.name}：此方案無費率`);
+      annual = (propSum * rate) / 1000;
+      sumText = wanText(propSum);
+    } else {
+      const opts = ref.covOptions.filter((o) => o.coverage_code === cov.code).sort((a, b) => a.sort - b.sort);
+      value = pick.value || (opts.find((o) => o.is_default) || opts[0] || {}).value;
+      const row = ref.covPremiums.get(`${plan.code}|${cov.code}|${value}`);
+      if (!row) throw new Error(`${cov.name}：查無 ${value} 萬元之保費`);
+      annual = Number(row.premium);
+      sumText = `${cov.sum_label ? cov.sum_label + '　' : ''}${value} 萬元`;
+    }
+    const premium = apply(annual);
+    homePremium += premium;
+    selections[cov.code] = { on: true, value };
+    lines.push({
+      code: cov.code, name: cov.name, sumText, premium, annual: round(annual),
+      includedText: premium === 0 && cov.code === 'TPL' ? '含於財物損害保險內' : null,
+    });
+  }
+
+  return {
+    planCode: plan.code,
+    kind: 'HOME',
+    targetName: '居家綜合保險',
+    lines,
+    propSum,
+    eqAlready: Boolean(input.eqAlready),
+    eqSum: eq.eqSum,
+    selections,
+    firePremium: 0,
+    eqPremium: eq.eqPremium,
+    homePremium,
+    totalPremium: homePremium + eq.eqPremium,
+    detail: {
+      planName: plan.name,
+      propRate: Number(plan.prop_rate),
+      propBaseFee: Number(plan.prop_base_fee),
+      eqBasis: eq.eqBasis,
+      periodMonths: months,
+      homeShortPct: homeShort,
+      eqShortPct: eqShort,
+    },
+  };
+}
+
+/** 依方案分流：HF 住宅火災及地震基本保險 / HA~HC 居家綜合保險 */
+function calcAny(ref, input) {
+  const plan = ref.plans.get(input.planCode || 'HF');
+  if (plan && plan.kind === 'HOME') return calculateHome(ref, input);
+  const c = calculate(ref, input);
+  const st = ref.settings;
+  return {
+    ...c,
+    planCode: 'HF',
+    kind: 'FIRE',
+    targetName: '住宅火災暨地震保險',
+    homePremium: 0,
+    lines: [
+      {
+        code: 'FIRE', name: '住宅火災保險',
+        sumText: `不動產 ${(c.buildingSum / WAN).toLocaleString('zh-TW')} 萬元　加保動產 ${(c.movableAddSum / WAN).toLocaleString('zh-TW')} 萬元`,
+        subText: `自動附加動產 ${(c.movableAutoSum / WAN).toLocaleString('zh-TW')} 萬元（免費）`,
+        premium: c.firePremium, annual: c.detail.fireAnnual,
+      },
+      { code: 'GLASS', name: '玻璃保險', sumText: `${st.glass_limit_text} 萬元`, premium: 0, includedText: '含於財物損害保險內' },
+      { code: 'EQ', name: '基本地震保險', sumText: wanText(c.eqSum), premium: c.eqPremium, annual: c.detail.eqAnnual },
+    ],
+  };
+}
+
+module.exports = { buildRef, monthsBetween, shortPct, suggestGrade, suggest, calculate, calculateHome, calcAny, unitPricePerPing };

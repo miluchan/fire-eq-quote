@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const R = require('./refdata');
 
-const q = (v) => (v === null || v === undefined ? 'NULL' : typeof v === 'number' ? String(v) : `'${String(v).replace(/'/g, "''")}'`);
+const q = (v) => (v === null || v === undefined ? 'NULL' : typeof v === 'number' || typeof v === 'boolean' ? String(v) : `'${String(v).replace(/'/g, "''")}'`);
 const rows = (arr) => arr.map((r) => `(${r.map(q).join(', ')})`).join(',\n  ');
 
 function buildSeedSql() {
@@ -35,6 +35,13 @@ function buildSeedSql() {
 
   out.push(`INSERT INTO banks (code, name) VALUES\n  ${rows(R.BANKS)}\nON CONFLICT (code) DO UPDATE SET name=EXCLUDED.name;`);
   out.push(`INSERT INTO nationalities (code, name) VALUES\n  ${rows(R.NATIONALITIES)}\nON CONFLICT (code) DO UPDATE SET name=EXCLUDED.name;`);
+
+  // ── 居家綜合保險（費率類 DO NOTHING：保留已在 DB 調整過的費率） ──
+  out.push(`INSERT INTO plans (code, name, kind, prop_label, prop_base_fee, prop_rate, sort) VALUES\n  ${rows(R.PLANS.map((p) => [p.code, p.name, p.kind, p.prop_label, p.prop_base_fee, p.prop_rate, p.sort]))}\nON CONFLICT (code) DO NOTHING;`);
+  out.push(`INSERT INTO coverages (code, name, sum_label, calc, required, default_on, sort) VALUES\n  ${rows(R.COVERAGES.map((c) => [c.code, c.name, c.sum_label, c.calc, c.required, c.default_on, c.sort]))}\nON CONFLICT (code) DO NOTHING;`);
+  out.push(`INSERT INTO coverage_options (coverage_code, value, is_default, sort) VALUES\n  ${rows(R.COVERAGE_OPTIONS.map((o) => [o.coverage_code, o.value, o.is_default, o.sort]))}\nON CONFLICT (coverage_code, value) DO NOTHING;`);
+  out.push(`INSERT INTO coverage_premiums (plan_code, coverage_code, value, premium, estimated) VALUES\n  ${rows(R.COVERAGE_PREMIUMS.map((p) => [p.plan_code, p.coverage_code, p.value, p.premium, p.estimated]))}\nON CONFLICT (plan_code, coverage_code, value) DO NOTHING;`);
+  out.push(`INSERT INTO coverage_rates (plan_code, coverage_code, rate) VALUES\n  ${rows(R.COVERAGE_RATE_ROWS.map((r) => [r.plan_code, r.coverage_code, r.rate]))}\nON CONFLICT (plan_code, coverage_code) DO NOTHING;`);
 
   out.push('COMMIT;');
   return out.join('\n\n') + '\n';

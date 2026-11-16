@@ -123,3 +123,71 @@ CREATE TABLE IF NOT EXISTS quote_seq (
   day  DATE PRIMARY KEY,
   last INTEGER NOT NULL
 );
+-- ═════════════ v3：居家綜合保險 ═════════════
+-- 投保方案：財物損害保費 = prop_base_fee + 保額 × prop_rate(‰)
+CREATE TABLE IF NOT EXISTS plans (
+  code          VARCHAR(4) PRIMARY KEY,
+  name          VARCHAR(40) NOT NULL,
+  kind          VARCHAR(6) NOT NULL CHECK (kind IN ('FIRE','HOME')),
+  prop_label    VARCHAR(60),
+  prop_base_fee NUMERIC(10,2) NOT NULL DEFAULT 0,
+  prop_rate     NUMERIC(8,4) NOT NULL DEFAULT 0,
+  sort          SMALLINT NOT NULL DEFAULT 0,
+  active        BOOLEAN NOT NULL DEFAULT true
+);
+
+-- 險種（第三人責任、附加險）
+CREATE TABLE IF NOT EXISTS coverages (
+  code       VARCHAR(6) PRIMARY KEY,
+  name       VARCHAR(40) NOT NULL,
+  sum_label  VARCHAR(60) NOT NULL DEFAULT '',
+  calc       VARCHAR(10) NOT NULL CHECK (calc IN ('TABLE','RATE_PROP')),
+  required   BOOLEAN NOT NULL DEFAULT false,
+  default_on BOOLEAN NOT NULL DEFAULT false,
+  sort       SMALLINT NOT NULL DEFAULT 0,
+  active     BOOLEAN NOT NULL DEFAULT true
+);
+
+-- 險種下拉選項（單位：萬元）
+CREATE TABLE IF NOT EXISTS coverage_options (
+  coverage_code VARCHAR(6) NOT NULL REFERENCES coverages(code),
+  value         VARCHAR(20) NOT NULL,
+  is_default    BOOLEAN NOT NULL DEFAULT false,
+  sort          SMALLINT NOT NULL DEFAULT 0,
+  PRIMARY KEY (coverage_code, value)
+);
+
+-- 查表保費（方案 × 險種 × 選項）；estimated = 依比例推估，待公司費率表確認
+CREATE TABLE IF NOT EXISTS coverage_premiums (
+  plan_code     VARCHAR(4) NOT NULL REFERENCES plans(code),
+  coverage_code VARCHAR(6) NOT NULL,
+  value         VARCHAR(20) NOT NULL,
+  premium       NUMERIC(10,2) NOT NULL,
+  estimated     BOOLEAN NOT NULL DEFAULT false,
+  PRIMARY KEY (plan_code, coverage_code, value),
+  FOREIGN KEY (coverage_code, value) REFERENCES coverage_options(coverage_code, value)
+);
+
+-- 依保額計費之險種費率（‰），例：綠能升級
+CREATE TABLE IF NOT EXISTS coverage_rates (
+  plan_code     VARCHAR(4) NOT NULL REFERENCES plans(code),
+  coverage_code VARCHAR(6) NOT NULL REFERENCES coverages(code),
+  rate          NUMERIC(8,4) NOT NULL,
+  PRIMARY KEY (plan_code, coverage_code)
+);
+
+-- 報價單新增欄位（可重複執行）
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS plan_code    VARCHAR(4) NOT NULL DEFAULT 'HF';
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS status1      VARCHAR(6) NOT NULL DEFAULT '報價中';  -- 報價中/已要保/已出單
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS status2      VARCHAR(6) NOT NULL DEFAULT '未繳費';  -- 未繳費/已繳費/已銷帳
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS prop_sum     BIGINT DEFAULT 0;        -- 財物損害保額（元）
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS eq_already   BOOLEAN NOT NULL DEFAULT false; -- 已投保住宅地震險
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS coverages    JSONB;                   -- 勾選險種與選項
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS lines        JSONB;                   -- 試算結果明細
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS home_premium INTEGER DEFAULT 0;       -- 居家保費
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ;             -- 確認要保時間
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS issued_at    TIMESTAMPTZ;             -- 出單時間（預留）
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS policy_no    VARCHAR(20);             -- 保單號碼（預留）
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS paid_at      TIMESTAMPTZ;             -- 繳費時間（預留）
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS deleted_at   TIMESTAMPTZ;             -- 軟刪除
+CREATE INDEX IF NOT EXISTS idx_quotes_status ON quotes (status1, status2) WHERE deleted_at IS NULL;
