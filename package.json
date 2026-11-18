@@ -1,6 +1,6 @@
 {
   "name": "fire-eq-quote",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "住宅火災及地震基本保險 報價系統（Vercel + Neon PostgreSQL）",
   "private": true,
   "scripts": {

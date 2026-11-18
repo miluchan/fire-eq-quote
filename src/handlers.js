@@ -6,7 +6,8 @@ const db = require('./db');
 const P = require('./premium');
 const SCHEMA = require('./schema');
 const { buildSeedSql } = require('./seed');
-const { LEDGER_FIELDS, buildPolicyLedger } = require('./ledger');
+const { LEDGER_FIELDS, EXT_KINDS, toIsoDate, buildPolicyLedger, buildExternalLedger } = require('./ledger');
+const crypto = require('crypto');
 
 // 參考資料快取：Serverless 實例存活期間沿用，60 秒後重新讀 DB（改費率後最多 1 分鐘生效）
 let cache = null;
@@ -200,6 +201,39 @@ const handlers = {
     return ok(r);
   },
 
+  /**
+   * 外部系統出單 POST /api/external（伺服器對伺服器，需 x-api-key = 環境變數 LEDGER_API_KEY）
+   * body: { source, extRef, insuredName, mailAddr?, paid, items: [{ kind:'CC'|'AC', premium, start, end }] }
+   */
+  async external({ method, body, headers }) {
+    need(method, ['POST']);
+    const expected = process.env.LEDGER_API_KEY || '';
+    if (!expected) throw new HttpError(503, '伺服器未設定 LEDGER_API_KEY，暫停受理外部出單');
+    const given = Buffer.from(String(headers['x-api-key'] || ''));
+    const want = Buffer.from(expected);
+    const keyOk = given.length === want.length && crypto.timingSafeEqual(given, want);
+    if (!keyOk) throw new HttpError(401, 'API 金鑰錯誤');
+
+    const source = String(body.source || '').trim();
+    const extRef = String(body.extRef || '').trim();
+    if (!/^[a-z0-9-]{2,20}$/.test(source)) throw new HttpError(400, 'source 格式錯誤');
+    if (!extRef || extRef.length > 40) throw new HttpError(400, '缺少來源單號 extRef');
+    const items = Array.isArray(body.items) ? body.items : [];
+    if (!items.length) throw new HttpError(400, '沒有要出單的保單');
+    const kinds = new Set();
+    for (const it of items) {
+      if (!EXT_KINDS[it.kind]) throw new HttpError(400, `不支援的保單字軌：${it.kind}`);
+      if (kinds.has(it.kind)) throw new HttpError(400, `保單字軌重複：${it.kind}`);
+      kinds.add(it.kind);
+      if (!(Number(it.premium) > 0)) throw new HttpError(400, `${it.kind} 保費需大於 0`);
+      if (!toIsoDate(it.start) || !toIsoDate(it.end)) throw new HttpError(400, `${it.kind} 保險期間格式錯誤`);
+    }
+    const info = { insuredName: body.insuredName, mailAddr: body.mailAddr, paid: Boolean(body.paid) };
+    const r = await db.issueExternal({ source, extRef, items },
+      (it, policyNo, day) => buildExternalLedger(it, policyNo, day, info));
+    return ok({ ok: true, ...r });
+  },
+
   /** 帳款檔查詢：?id= 內容；否則清單（kw / frcvpay / ftype） */
   async ledger({ method, query }) {
     need(method, ['GET']);
@@ -233,11 +267,11 @@ const handlers = {
 };
 
 /** 統一執行並轉成 HTTP 回應 */
-async function run(name, { method, query = {}, body = {} }) {
+async function run(name, { method, query = {}, body = {}, headers = {} }) {
   try {
     const h = handlers[name];
     if (!h) throw new HttpError(404, 'API not found');
-    return await h({ method, query, body: body || {} });
+    return await h({ method, query, body: body || {}, headers: headers || {} });
   } catch (e) {
     if (e.status) return { status: e.status, data: { error: e.message } };
     if (e.code) { // PostgreSQL 錯誤
@@ -254,7 +288,7 @@ function vercel(name) {
   return async (req, res) => {
     let body = req.body;
     if (typeof body === 'string') { try { body = JSON.parse(body); } catch (_) { body = {}; } }
-    const r = await run(name, { method: req.method, query: req.query || {}, body });
+    const r = await run(name, { method: req.method, query: req.query || {}, body, headers: req.headers || {} });
     res.setHeader('Cache-Control', 'no-store');
     res.status(r.status).json(r.data);
   };

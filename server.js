@@ -30,6 +30,7 @@ http.createServer(async (req, res) => {
       method: req.method,
       query: Object.fromEntries(url.searchParams),
       body: req.method === 'POST' ? await readBody(req) : {},
+      headers: req.headers,
     });
     res.writeHead(r.status, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(r.data));

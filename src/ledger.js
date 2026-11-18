@@ -97,6 +97,28 @@ CREATE TABLE IF NOT EXISTS policy_seq (
   last INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_quotes_policy_no ON quotes (policy_no) WHERE policy_no IS NOT NULL;
+
+-- 保單號碼流水號（依字軌分開：PF 住火、CC 汽車強制、AC 汽車任意…，每日從 0001 起）
+CREATE TABLE IF NOT EXISTS policy_no_seq (
+  prefix VARCHAR(4) NOT NULL,
+  day    DATE NOT NULL,
+  last   INTEGER NOT NULL,
+  PRIMARY KEY (prefix, day)
+);
+-- 舊版 PF 流水號搬入新表（可重複執行，取較大值）
+INSERT INTO policy_no_seq (prefix, day, last)
+SELECT 'PF', day, last FROM policy_seq
+ON CONFLICT (prefix, day) DO UPDATE SET last = GREATEST(policy_no_seq.last, EXCLUDED.last);
+
+-- 外部系統出單對照（同一來源單號＋保單別只出一次，重送時回傳原保單號）
+CREATE TABLE IF NOT EXISTS ext_policy_issue (
+  source     VARCHAR(20) NOT NULL,   -- 例：car-online
+  ext_ref    VARCHAR(40) NOT NULL,   -- 來源系統報價單號
+  kind       VARCHAR(4)  NOT NULL,   -- 保單字軌：CC / AC
+  ipolicy1   VARCHAR(20) NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (source, ext_ref, kind)
+);
 `;
 
 /** 西元 'YYYY-MM-DD' → 民國 'YYYMMDD'（例 2026-11-16 → 1151116） */
@@ -105,7 +127,44 @@ function rocCompact(iso) {
   return `${Number(y) - 1911}${m}${d}`;
 }
 
-const policyNoOf = (day, n) => `PF${rocCompact(day)}${String(n).padStart(4, '0')}`;
+const policyNoOf = (day, n, prefix = 'PF') => `${prefix}${rocCompact(day)}${String(n).padStart(4, '0')}`;
+
+/** 外部系統可用的保單字軌與對應險別 */
+const EXT_KINDS = {
+  CC: { insure_type: 'C', label: '汽車強制險' },
+  AC: { insure_type: 'C', label: '汽車任意險' },
+};
+
+/** 日期轉 'YYYY-MM-DD'：接受西元 'YYYY-MM-DD' 或民國 'YYYMMDD'（例 1151118） */
+function toIsoDate(v) {
+  const s = String(v || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  if (/^\d{7}$/.test(s)) return `${Number(s.slice(0, 3)) + 1911}-${s.slice(3, 5)}-${s.slice(5, 7)}`;
+  return null;
+}
+
+/** 外部系統（汽車險網投）出單寫入帳款檔的內容 */
+function buildExternalLedger(item, policyNo, day, info) {
+  const premium = Math.round(Number(item.premium));
+  return {
+    ipolicy1: policyNo,
+    dplyend: day,
+    ftype: 'P',
+    isub: '00',
+    nassured: String(info.insuredName || '').slice(0, 120),
+    mprem: premium,
+    icur: 'NT',
+    aassured: String(info.mailAddr || '').slice(0, 50),
+    dbegin: toIsoDate(item.start),
+    dend: toIsoDate(item.end),
+    fcommit: 'N',
+    frcvpay: info.paid ? 'P' : 'N',          // 網投已線上繳費 → P 已收費
+    dpay: info.paid ? day : null,
+    insure_type: EXT_KINDS[item.kind].insure_type,
+    puredplyend: day,
+    mprem_nt: premium,
+  };
+}
 
 /**
  * 出單時寫入帳款檔的內容（未列欄位一律留預設空白）
@@ -136,4 +195,4 @@ function buildPolicyLedger(q, policyNo, day, zips) {
   };
 }
 
-module.exports = { LEDGER_FIELDS, LEDGER_SCHEMA, rocCompact, policyNoOf, buildPolicyLedger };
+module.exports = { LEDGER_FIELDS, LEDGER_SCHEMA, EXT_KINDS, rocCompact, toIsoDate, policyNoOf, buildPolicyLedger, buildExternalLedger };

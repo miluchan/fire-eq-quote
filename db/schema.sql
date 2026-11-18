@@ -316,3 +316,25 @@ CREATE TABLE IF NOT EXISTS policy_seq (
   last INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_quotes_policy_no ON quotes (policy_no) WHERE policy_no IS NOT NULL;
+
+-- 保單號碼流水號（依字軌分開：PF 住火、CC 汽車強制、AC 汽車任意…，每日從 0001 起）
+CREATE TABLE IF NOT EXISTS policy_no_seq (
+  prefix VARCHAR(4) NOT NULL,
+  day    DATE NOT NULL,
+  last   INTEGER NOT NULL,
+  PRIMARY KEY (prefix, day)
+);
+-- 舊版 PF 流水號搬入新表（可重複執行，取較大值）
+INSERT INTO policy_no_seq (prefix, day, last)
+SELECT 'PF', day, last FROM policy_seq
+ON CONFLICT (prefix, day) DO UPDATE SET last = GREATEST(policy_no_seq.last, EXCLUDED.last);
+
+-- 外部系統出單對照（同一來源單號＋保單別只出一次，重送時回傳原保單號）
+CREATE TABLE IF NOT EXISTS ext_policy_issue (
+  source     VARCHAR(20) NOT NULL,   -- 例：car-online
+  ext_ref    VARCHAR(40) NOT NULL,   -- 來源系統報價單號
+  kind       VARCHAR(4)  NOT NULL,   -- 保單字軌：CC / AC
+  ipolicy1   VARCHAR(20) NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (source, ext_ref, kind)
+);

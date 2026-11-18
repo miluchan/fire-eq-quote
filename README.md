@@ -178,7 +178,9 @@ npm test
 | `coverage_premiums` | 方案 × 險種 × 選項 保費（`estimated` 標示推估值） |
 | `coverage_rates` | 依保額計費的險種費率‰（綠能升級） |
 | `ao_plyedr_prem` | 保批單帳款檔（規格 1~48 欄，`itakeover_i` 標示不用未建，共 47 欄）。CHAR→VARCHAR 預設空白、DATE 預設 NULL、DECIMAL/INTEGER/SMALLINT 預設 0；索引依規格 ao_plyedr_ix_1(U) ~ ix_4、prem_x1、prem_x2 |
-| `policy_seq` | 保單號碼每日流水號（PF + 民國年月日 + 4 碼，例 PF11511160001） |
+| `policy_no_seq` | 保單號碼每日流水號，依字首分開編（PF 住火、CC 強制車險、AC 任意車險；字首 + 民國年月日 + 4 碼，例 PF11511160001、CC11511180001） |
+| `policy_seq` | 舊版住火流水號（已轉入 policy_no_seq 的 PF，保留不刪） |
+| `ext_policy_issue` | 外部系統出單對照（來源 + 外部單號 + 保單種類 → 保單號碼），重送時回傳原保單號、不重複出單 |
 | `quotes` | 報價單：方案、狀態1（報價中/已要保/已出單）、狀態2（未繳費/已繳費/已銷帳）、住火/地震/居家保費、試算明細；預留 policy_no / issued_at / paid_at；刪除為軟刪除 |
 | `quote_seq` | 要保號碼每日流水號（H + 民國年月日 + 4 碼） |
 
@@ -199,6 +201,7 @@ npm test
 | POST | `/api/issue` | 確認出單 `{quoteNo}`：需「已要保」；單一交易寫入 ao_plyedr_prem、報價單改「已出單」並記錄保單號碼 |
 | GET | `/api/ledger?kw=&ftype=&frcvpay=` | 帳款檔清單 |
 | GET | `/api/ledger?id=` | 帳款檔內容 |
+| POST | `/api/external` | 外部系統出單（汽車險網投），需 header `x-api-key` = 環境變數 `LEDGER_API_KEY`，見下方 |
 | GET | `/api/init` | 建立／更新資料表＋種子資料（可重複執行） |
 
 ### 出單寫入帳款檔的內容
@@ -221,6 +224,18 @@ npm test
 | 其他欄位 | 空白（日期 NULL、金額 0） |
 
 報價單狀態流程：儲存報價單 → **報價中** → 確認要保 → **已要保** → 確認出單 → **已出單**
+
+### 外部系統出單（汽車險網投）`POST /api/external`
+
+```json
+{ "source": "car-online", "extRef": "網投報價單號", "insuredName": "王小明", "mailAddr": "", "paid": true,
+  "items": [ { "kind": "CC", "premium": 1250, "start": "1151118", "end": "1161118" },
+             { "kind": "AC", "premium": 8800, "start": "1151118", "end": "1161118" } ] }
+```
+- 強制險 CC、任意險 AC 各出一張保單（號碼各自流水），險別 insure_type 都是 **C**；日期可用民國 7 碼或 YYYY-MM-DD
+- 同一 `source + extRef + kind` 重送只回傳原保單號（`existed: true`），不會重複寫入
+- 網投已線上繳費（`paid: true`）→ frcvpay = **P**、dpay = 出單日；其餘欄位同住火出單
+- 未設定 `LEDGER_API_KEY` 時此 API 回 503（關閉）
 
 ## 五、修改費率
 

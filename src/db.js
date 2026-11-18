@@ -228,9 +228,7 @@ async function issuePolicy(quoteNo, build) {
     if (!q || q.deleted_at) throw new DbError(404, '查無此報價單號');
     if (q.status1 !== '已要保') throw new DbError(409, `報價單狀態為「${q.status1}」，需「已要保」才能出單`);
     const day = taipeiToday();
-    const n = (mem.policySeq.get(day) || 0) + 1;
-    mem.policySeq.set(day, n);
-    const policyNo = L.policyNoOf(day, n);
+    const policyNo = L.policyNoOf(day, memNextSeq('PF', day), 'PF');
     const row = { id: mem.ledger.length + 1, created_at: new Date().toISOString() };
     for (const f of L.LEDGER_FIELDS) row[f.name] = f.type === 'DATE' ? null : /^(DECIMAL|INTEGER|SMALLINT)/.test(f.type) ? 0 : '';
     Object.assign(row, build(q, policyNo, day));
@@ -250,10 +248,7 @@ async function issuePolicy(quoteNo, build) {
     if (q.policy_no) throw new DbError(409, `此報價單已出單（保單號碼 ${q.policy_no}）`);
 
     const { rows: [d] } = await client.query(`SELECT to_char((now() AT TIME ZONE 'Asia/Taipei')::date, 'YYYY-MM-DD') AS day`);
-    const { rows: [s] } = await client.query(
-      `INSERT INTO policy_seq (day, last) VALUES ($1, 1)
-       ON CONFLICT (day) DO UPDATE SET last = policy_seq.last + 1 RETURNING last`, [d.day]);
-    const policyNo = L.policyNoOf(d.day, s.last);
+    const policyNo = await nextPolicyNo(client, 'PF', d.day);
 
     const rec = build(q, policyNo, d.day);
     const cols = Object.keys(rec);
@@ -265,6 +260,76 @@ async function issuePolicy(quoteNo, build) {
         WHERE quote_no = $1 RETURNING *`, [quoteNo, policyNo]);
     await client.query('COMMIT');
     return { policyNo, ledger, quote };
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+function memNextSeq(prefix, day) {
+  const k = `${prefix}|${day}`;
+  const n = (mem.policySeq.get(k) || 0) + 1;
+  mem.policySeq.set(k, n);
+  return n;
+}
+
+/** 取下一個保單號碼（同一交易內呼叫；依字軌＋日期流水） */
+async function nextPolicyNo(client, prefix, day) {
+  const { rows: [s] } = await client.query(
+    `INSERT INTO policy_no_seq (prefix, day, last) VALUES ($1, $2, 1)
+     ON CONFLICT (prefix, day) DO UPDATE SET last = policy_no_seq.last + 1 RETURNING last`, [prefix, day]);
+  return L.policyNoOf(day, s.last, prefix);
+}
+
+/**
+ * 外部系統出單（例：汽車險網投）：單一交易
+ * 同一 source + extRef + 保單字軌只會出一次；重送時直接回傳原保單號（冪等）
+ * build(item, policyNo, day) 回傳要寫入帳款檔的欄位
+ */
+async function issueExternal({ source, extRef, items }, build) {
+  if (!usingDb()) {
+    mem.extIssue = mem.extIssue || new Map();
+    const day = taipeiToday();
+    const policies = items.map((it) => {
+      const key = `${source}|${extRef}|${it.kind}`;
+      if (mem.extIssue.has(key)) return { kind: it.kind, policyNo: mem.extIssue.get(key), existed: true };
+      const policyNo = L.policyNoOf(day, memNextSeq(it.kind, day), it.kind);
+      const row = { id: mem.ledger.length + 1, created_at: new Date().toISOString() };
+      for (const f of L.LEDGER_FIELDS) row[f.name] = f.type === 'DATE' ? null : /^(DECIMAL|INTEGER|SMALLINT)/.test(f.type) ? 0 : '';
+      Object.assign(row, build(it, policyNo, day));
+      mem.ledger.push(row);
+      mem.extIssue.set(key, policyNo);
+      return { kind: it.kind, policyNo, existed: false };
+    });
+    return { day, policies };
+  }
+
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    // 同一張來源單據序列化，避免兩個請求同時出單
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`${source}|${extRef}`]);
+    const { rows: [d] } = await client.query(`SELECT to_char((now() AT TIME ZONE 'Asia/Taipei')::date, 'YYYY-MM-DD') AS day`);
+    const policies = [];
+    for (const it of items) {
+      const { rows: [ex] } = await client.query(
+        'SELECT ipolicy1 FROM ext_policy_issue WHERE source = $1 AND ext_ref = $2 AND kind = $3', [source, extRef, it.kind]);
+      if (ex) { policies.push({ kind: it.kind, policyNo: ex.ipolicy1, existed: true }); continue; }
+      const policyNo = await nextPolicyNo(client, it.kind, d.day);
+      const rec = build(it, policyNo, d.day);
+      const cols = Object.keys(rec);
+      await client.query(
+        `INSERT INTO ao_plyedr_prem (${cols.join(', ')}) VALUES (${cols.map((_, i) => `$${i + 1}`).join(', ')})`,
+        cols.map((c) => rec[c]));
+      await client.query(
+        'INSERT INTO ext_policy_issue (source, ext_ref, kind, ipolicy1) VALUES ($1, $2, $3, $4)',
+        [source, extRef, it.kind, policyNo]);
+      policies.push({ kind: it.kind, policyNo, existed: false });
+    }
+    await client.query('COMMIT');
+    return { day: d.day, policies };
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
     throw e;
@@ -309,5 +374,5 @@ async function getLedger(id) {
 
 module.exports = {
   exec, usingDb, loadRefData, saveQuote, getQuote, findLatest, listQuotes, deleteQuote, nextQuoteNo,
-  issuePolicy, listLedger, getLedger,
+  issuePolicy, issueExternal, listLedger, getLedger,
 };
