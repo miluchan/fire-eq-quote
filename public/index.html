@@ -18,6 +18,7 @@
     <button type="button" id="btnQuery">查詢報價單</button>
     <button type="button" id="btnPrint">列印報價單</button>
     <button type="button" id="btnLedger">帳款檔查詢</button>
+    <button type="button" id="btnVoucher">傳票開立</button>
   </div>
 </header>
 
@@ -317,6 +318,39 @@
         <tbody id="ldBody"></tbody>
       </table>
     </div>
+  </div>
+</div>
+
+<!-- ═════════════ 傳票開立／查詢 ═════════════ -->
+<div id="voucherModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="vmTitle">
+  <div class="modal-box">
+    <div class="modal-head">
+      <span id="vmTitle">傳票開立　由保批單帳款檔 (ao_plyedr_prem) 產生</span>
+      <button type="button" class="modal-x" data-close="voucherModal" aria-label="關閉">✕</button>
+    </div>
+    <div class="modal-filter">
+      日期區間 <input id="vmFrom" class="w7" maxlength="7" inputmode="numeric" placeholder="1151121"> ～
+      <input id="vmTo" class="w7" maxlength="7" inputmode="numeric" placeholder="1151121">
+      <button type="button" id="vmPreview">預覽</button>
+      <button type="button" id="vmCreate" class="primary">開立傳票</button>
+      <button type="button" id="vmList">查詢已開傳票</button>
+      <span class="muted">出單立帳依出單日、收費沖銷依繳費日；已開過的帳款不會重開</span>
+    </div>
+    <div class="modal-body">
+      <div id="vmNote" class="vm-note"></div>
+      <div id="vmBody"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 傳票內容 -->
+<div id="voucherDetail" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="vdTitle">
+  <div class="modal-box narrow">
+    <div class="modal-head">
+      <span id="vdTitle">傳票內容</span>
+      <button type="button" class="modal-x" data-close="voucherDetail" aria-label="關閉">✕</button>
+    </div>
+    <div class="modal-body" id="vdBody"></div>
   </div>
 </div>
 

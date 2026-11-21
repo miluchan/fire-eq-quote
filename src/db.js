@@ -338,6 +338,141 @@ async function issueExternal({ source, extRef, items }, build) {
   }
 }
 
+// ═════════ 傳票 ═════════
+const V = require('./voucher');
+
+/** 會計科目、科目對照、保單字軌 → 收入科目／稅率 */
+async function loadGl(client) {
+  if (!usingDb()) return V.DEFAULT_GL;
+  const run = (sql) => (client ? client.query(sql) : getPool().query(sql)).then((r) => r.rows);
+  const [accounts, maps, prem] = await Promise.all([
+    run('SELECT code, name, category, dc, active FROM gl_accounts ORDER BY code'),
+    run('SELECT map_key, account_code FROM gl_account_map'),
+    run('SELECT prefix, label, revenue_code, tax_rate FROM gl_premium_map'),
+  ]);
+  const map = Object.fromEntries(maps.map((m) => [m.map_key, m.account_code]));
+  for (const k of ['AR', 'BANK', 'TAX']) if (!map[k]) throw new DbError(500, `gl_account_map 缺少 ${k} 科目設定`);
+  const premium = Object.fromEntries(prem.map((p) => [p.prefix, { label: p.label, revenue_code: p.revenue_code, tax_rate: Number(p.tax_rate) }]));
+  return { accounts, map, premium };
+}
+
+/** 區間內尚未開立傳票的帳款（只取保單 ftype=P） */
+async function pendingForVoucher(client, from, to) {
+  if (!usingDb()) {
+    const done = mem.voucherSrc || new Set();
+    const inRange = (d) => d && d >= from && d <= to;
+    return {
+      issueRows: mem.ledger.filter((r) => r.ftype === 'P' && inRange(r.dplyend) && !done.has(`${r.id}|ISSUE`)),
+      receiptRows: mem.ledger.filter((r) => r.ftype === 'P' && r.frcvpay === 'P' && inRange(r.dpay) && !done.has(`${r.id}|RECEIPT`)),
+    };
+  }
+  const cols = 'a.id, a.ipolicy1, a.nassured, a.insure_type, a.mprem, a.mprem_nt, a.dplyend, a.dpay, a.frcvpay';
+  const { rows: issueRows } = await client.query(
+    `SELECT ${cols} FROM ao_plyedr_prem a
+      WHERE a.ftype = 'P' AND a.dplyend BETWEEN $1 AND $2
+        AND NOT EXISTS (SELECT 1 FROM gl_voucher_src s WHERE s.ledger_id = a.id AND s.vtype = 'ISSUE')
+      ORDER BY a.dplyend, a.ipolicy1`, [from, to]);
+  const { rows: receiptRows } = await client.query(
+    `SELECT ${cols} FROM ao_plyedr_prem a
+      WHERE a.ftype = 'P' AND a.frcvpay = 'P' AND a.dpay BETWEEN $1 AND $2
+        AND NOT EXISTS (SELECT 1 FROM gl_voucher_src s WHERE s.ledger_id = a.id AND s.vtype = 'RECEIPT')
+      ORDER BY a.dpay, a.ipolicy1`, [from, to]);
+  return { issueRows, receiptRows };
+}
+
+/** 傳票預覽（不寫入） */
+async function previewVouchers(from, to) {
+  if (!usingDb()) {
+    const p = await pendingForVoucher(null, from, to);
+    return V.buildVouchers(p.issueRows, p.receiptRows, V.DEFAULT_GL);
+  }
+  const client = await getPool().connect();
+  try {
+    const gl = await loadGl(client);
+    const p = await pendingForVoucher(client, from, to);
+    return V.buildVouchers(p.issueRows, p.receiptRows, gl);
+  } finally {
+    client.release();
+  }
+}
+
+/** 傳票開立（單一交易；同時只允許一個批次執行，已開立的帳款不會重開） */
+async function createVouchers(from, to) {
+  if (!usingDb()) {
+    mem.vouchers = mem.vouchers || [];
+    mem.voucherSrc = mem.voucherSrc || new Set();
+    const p = await pendingForVoucher(null, from, to);
+    const r = V.buildVouchers(p.issueRows, p.receiptRows, V.DEFAULT_GL);
+    for (const v of r.vouchers) {
+      v.voucher_no = L.policyNoOf(v.vdate, memNextSeq('V', v.vdate), 'V');
+      mem.vouchers.push({ ...v, created_at: new Date().toISOString(), status: '已開立' });
+      v.ledgerIds.forEach((id) => mem.voucherSrc.add(`${id}|${v.vtype}`));
+    }
+    return r;
+  }
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('gl_voucher_batch'))");
+    const gl = await loadGl(client);
+    const p = await pendingForVoucher(client, from, to);
+    const r = V.buildVouchers(p.issueRows, p.receiptRows, gl);
+    for (const v of r.vouchers) {
+      v.voucher_no = await nextPolicyNo(client, 'V', v.vdate);
+      await client.query(
+        `INSERT INTO gl_voucher (voucher_no, vdate, vtype, vkind, summary, total_dr, total_cr, doc_count)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [v.voucher_no, v.vdate, v.vtype, v.vkind, v.summary, v.totalDr, v.totalCr, v.ledgerIds.length]);
+      for (const l of v.lines) {
+        await client.query(
+          `INSERT INTO gl_voucher_line (voucher_no, line_no, account_code, dr, cr, ipolicy1, memo)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [v.voucher_no, l.line_no, l.account_code, l.dr, l.cr, l.ipolicy1, l.memo.slice(0, 100)]);
+      }
+      await client.query(
+        `INSERT INTO gl_voucher_src (ledger_id, vtype, voucher_no)
+         SELECT unnest($1::bigint[]), $2, $3`, [v.ledgerIds, v.vtype, v.voucher_no]);
+    }
+    await client.query('COMMIT');
+    return r;
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+/** 傳票清單（依傳票日期區間） */
+async function listVouchers(from, to) {
+  if (!usingDb()) {
+    return (mem.vouchers || []).filter((v) => v.vdate >= from && v.vdate <= to)
+      .map((v) => ({ voucher_no: v.voucher_no, vdate: v.vdate, vtype: v.vtype, vkind: v.vkind, summary: v.summary,
+        total_dr: v.totalDr, total_cr: v.totalCr, doc_count: v.ledgerIds.length, status: v.status, created_at: v.created_at }))
+      .sort((a, b) => a.voucher_no.localeCompare(b.voucher_no));
+  }
+  return q(
+    `SELECT voucher_no, vdate, vtype, vkind, summary, total_dr, total_cr, doc_count, status, created_at
+       FROM gl_voucher WHERE vdate BETWEEN $1 AND $2 ORDER BY voucher_no`, [from, to]);
+}
+
+/** 傳票內容（主檔＋明細） */
+async function getVoucher(no) {
+  if (!usingDb()) {
+    const v = (mem.vouchers || []).find((x) => x.voucher_no === no);
+    if (!v) return null;
+    return { voucher_no: v.voucher_no, vdate: v.vdate, vtype: v.vtype, vkind: v.vkind, summary: v.summary,
+      total_dr: v.totalDr, total_cr: v.totalCr, doc_count: v.ledgerIds.length, status: v.status, created_at: v.created_at, lines: v.lines };
+  }
+  const [h] = await q('SELECT * FROM gl_voucher WHERE voucher_no = $1', [no]);
+  if (!h) return null;
+  h.lines = await q(
+    `SELECT l.line_no, l.account_code, a.name AS account_name, l.dr, l.cr, l.ipolicy1, l.memo
+       FROM gl_voucher_line l JOIN gl_accounts a ON a.code = l.account_code
+      WHERE l.voucher_no = $1 ORDER BY l.line_no`, [no]);
+  return h;
+}
+
 /** 帳款檔清單（可依保單號碼/報價單號/要保人、收支註記、類別型態篩選） */
 async function listLedger({ kw = '', frcvpay = '', ftype = '', limit = 200 } = {}) {
   const k = String(kw).trim();
@@ -375,4 +510,5 @@ async function getLedger(id) {
 module.exports = {
   exec, usingDb, loadRefData, saveQuote, getQuote, findLatest, listQuotes, deleteQuote, nextQuoteNo,
   issuePolicy, issueExternal, listLedger, getLedger,
+  loadGl, previewVouchers, createVouchers, listVouchers, getVoucher,
 };

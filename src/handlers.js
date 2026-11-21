@@ -246,6 +246,45 @@ const handlers = {
   },
 
   /**
+   * 傳票 /api/vouchers
+   * GET  ?no=傳票號碼            傳票內容（含明細）
+   * GET  ?from=&to=              傳票清單（傳票日期區間）
+   * GET  ?preview=1&from=&to=    預覽：區間內尚未開立的帳款會產生哪些傳票（不寫入）
+   * GET  ?accounts=1             會計科目與對照設定
+   * POST { action:'create', from, to }  傳票開立
+   * 日期可用民國 7 碼（1151121）或 YYYY-MM-DD；出單立帳依出單日、收費沖銷依繳費日
+   */
+  async vouchers({ method, query, body }) {
+    need(method, ['GET', 'POST']);
+    const range = (src) => {
+      const from = toIsoDate(src.from);
+      const to = toIsoDate(src.to || src.from);
+      if (!from || !to) throw new HttpError(400, '請輸入正確的日期區間（民國年月日 7 碼）');
+      if (from > to) throw new HttpError(400, '起日不可大於迄日');
+      if ((new Date(to) - new Date(from)) / 86400000 > 92) throw new HttpError(400, '日期區間最多 3 個月');
+      return [from, to];
+    };
+    if (method === 'POST') {
+      if (body.action !== 'create') throw new HttpError(400, '不支援的動作');
+      const [from, to] = range(body);
+      const r = await db.createVouchers(from, to);
+      return ok({ ok: true, from, to, created: r.vouchers.map(({ ledgerIds, ...v }) => ({ ...v, doc_count: ledgerIds.length })), skipped: r.skipped });
+    }
+    if (query.no) {
+      const v = await db.getVoucher(String(query.no));
+      if (!v) throw new HttpError(404, '查無此傳票');
+      return ok(v);
+    }
+    if (query.accounts) return ok(await db.loadGl());
+    const [from, to] = range(query);
+    if (query.preview) {
+      const r = await db.previewVouchers(from, to);
+      return ok({ from, to, vouchers: r.vouchers.map(({ ledgerIds, ...v }) => ({ ...v, doc_count: ledgerIds.length })), skipped: r.skipped });
+    }
+    return ok(await db.listVouchers(from, to));
+  },
+
+  /**
    * 建立／更新資料表＋寫入種子資料：瀏覽器開 /api/init
    * 可重複執行、不會刪除資料；費率類資料若已存在不覆蓋（保留在 DB 調整過的費率）
    * 每次部署新版（資料表有變動）後執行一次即可
@@ -261,7 +300,8 @@ const handlers = {
       (SELECT count(*) FROM coverages)::int AS coverages,
       (SELECT count(*) FROM coverage_premiums)::int AS coverage_premiums,
       (SELECT count(*) FROM quotes WHERE deleted_at IS NULL)::int AS quotes,
-      (SELECT count(*) FROM ao_plyedr_prem)::int AS ao_plyedr_prem`);
+      (SELECT count(*) FROM ao_plyedr_prem)::int AS ao_plyedr_prem,
+      (SELECT count(*) FROM gl_voucher)::int AS gl_voucher`);
     return ok({ ok: true, message: '✔ 資料表建立／更新完成、種子資料寫入完成', counts: r.rows[0] });
   },
 };

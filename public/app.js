@@ -406,11 +406,19 @@
     $('btnQuery').addEventListener('click', openQuery);
     $('btnPrint').addEventListener('click', printQuote);
     $('btnLedger').addEventListener('click', openLedger);
+    $('btnVoucher').addEventListener('click', openVoucher);
+    $('vmPreview').addEventListener('click', () => withBusy($('vmPreview'), previewVouchers));
+    $('vmCreate').addEventListener('click', () => withBusy($('vmCreate'), createVouchers));
+    $('vmList').addEventListener('click', () => withBusy($('vmList'), listVouchers));
+    $('vmBody').addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-vno]');
+      if (b) openVoucherDetail(b.dataset.vno).catch((err) => alert(err.message));
+    });
     $('btnIssue').addEventListener('click', () => withBusy($('btnIssue'), issuePolicy));
 
     // 帳款檔
     $$('[data-close]').forEach((b) => b.addEventListener('click', () => $(b.dataset.close).classList.add('hidden')));
-    ['ledgerModal', 'ledgerDetail'].forEach((id) => $(id).addEventListener('click', (e) => { if (e.target.id === id) $(id).classList.add('hidden'); }));
+    ['ledgerModal', 'ledgerDetail', 'voucherModal', 'voucherDetail'].forEach((id) => $(id).addEventListener('click', (e) => { if (e.target.id === id) $(id).classList.add('hidden'); }));
     $('lmSearch').addEventListener('click', loadLedger);
     $('lmKw').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadLedger(); });
     $('lmFtype').addEventListener('change', loadLedger);
@@ -425,7 +433,7 @@
     $('queryModal').addEventListener('click', (e) => { if (e.target.id === 'queryModal') closeQuery(); });
     document.addEventListener('keydown', (e) => {
       if (e.key !== 'Escape') return;
-      const open = ['ledgerDetail', 'ledgerModal', 'queryModal'].find((id) => !$(id).classList.contains('hidden'));
+      const open = ['voucherDetail', 'voucherModal', 'ledgerDetail', 'ledgerModal', 'queryModal'].find((id) => !$(id).classList.contains('hidden'));
       if (open) $(open).classList.add('hidden');
     });
     $('qmSearch').addEventListener('click', loadList);
@@ -667,6 +675,85 @@
         <td class="code">${esc(f.type)}</td><td class="val">${esc(text)}</td></tr>`;
     }).join('');
     $('ledgerDetail').classList.remove('hidden');
+  }
+
+  // ── 傳票開立 ─────────────────────────────────────
+  const todayRoc = () => rocCompact(new Date(Date.now() + 8 * 3600 * 1000).toISOString());
+  const vRange = () => {
+    const from = $('vmFrom').value.trim(), to = $('vmTo').value.trim() || from;
+    if (!/^\d{7}$/.test(from) || !/^\d{7}$/.test(to)) throw new Error('請輸入民國年月日 7 碼，例 1151121');
+    return { from, to };
+  };
+  const vNote = (text, err) => { $('vmNote').textContent = text; $('vmNote').className = 'vm-note' + (err ? ' err' : ''); };
+
+  function openVoucher() {
+    if (!$('vmFrom').value) { $('vmFrom').value = todayRoc(); $('vmTo').value = todayRoc(); }
+    vNote('選擇日期區間後按「預覽」確認內容，再按「開立傳票」。');
+    $('vmBody').innerHTML = '';
+    $('voucherModal').classList.remove('hidden');
+  }
+
+  function voucherCard(v, withBtn) {
+    const lines = v.lines.map((l) => `<tr>
+        <td class="center">${l.line_no}</td><td class="code">${esc(l.account_code)}</td><td>${esc(l.account_name)}</td>
+        <td class="r">${l.dr ? fmt(l.dr) : ''}</td><td class="r">${l.cr ? fmt(l.cr) : ''}</td>
+        <td>${esc(l.ipolicy1)}</td><td>${esc(l.memo)}</td></tr>`).join('');
+    return `<div class="voucher">
+      <div class="voucher-head">
+        <b>${esc(v.voucher_no || '（預覽，開立時給號）')}</b>
+        <span class="vkind ${esc(v.vtype)}">${esc(v.vkind)}</span>
+        <span>傳票日期 ${rocCompact(v.vdate)}</span><span>${esc(v.summary)}</span>
+        ${withBtn ? `<button type="button" data-vno="${esc(v.voucher_no)}">內容</button>` : ''}
+      </div>
+      <table class="list">
+        <thead><tr><th>項次</th><th>科目代碼</th><th>科目名稱</th><th class="r">借方</th><th class="r">貸方</th><th>保單號碼</th><th>摘要</th></tr></thead>
+        <tbody>${lines}<tr class="total"><td colspan="3" class="r">合計</td>
+          <td class="r">${fmt(v.totalDr ?? v.total_dr)}</td><td class="r">${fmt(v.totalCr ?? v.total_cr)}</td><td colspan="2"></td></tr></tbody>
+      </table></div>`;
+  }
+
+  const skippedHtml = (sk) => (sk.length ? `<div class="vm-note err">以下帳款未開立：${sk.map((x) => esc(`${x.ipolicy1}（${x.reason}）`)).join('、')}</div>` : '');
+
+  async function previewVouchers() {
+    try {
+      const { from, to } = vRange();
+      const r = await api(`/api/vouchers?preview=1&from=${from}&to=${to}`);
+      vNote(r.vouchers.length ? `預覽：將開立 ${r.vouchers.length} 張傳票（尚未寫入）` : '此區間沒有待開立的帳款');
+      $('vmBody').innerHTML = r.vouchers.map((v) => voucherCard(v, false)).join('') + skippedHtml(r.skipped);
+    } catch (e) { vNote(e.message, true); }
+  }
+
+  async function createVouchers() {
+    try {
+      const { from, to } = vRange();
+      if (!confirm(`確定開立 ${from} ～ ${to} 的傳票？`)) return;
+      const r = await api('/api/vouchers', { action: 'create', from, to });
+      vNote(r.created.length ? `已開立 ${r.created.length} 張傳票：${r.created.map((v) => v.voucher_no).join('、')}` : '此區間沒有待開立的帳款（已開過的不會重開）');
+      $('vmBody').innerHTML = r.created.map((v) => voucherCard(v, true)).join('') + skippedHtml(r.skipped);
+    } catch (e) { vNote(e.message, true); }
+  }
+
+  async function listVouchers() {
+    try {
+      const { from, to } = vRange();
+      const rows = await api(`/api/vouchers?from=${from}&to=${to}`);
+      vNote(`已開傳票 共 ${rows.length} 張`);
+      $('vmBody').innerHTML = rows.length ? `<table class="list"><thead><tr>
+          <th>傳票號碼</th><th>傳票日期</th><th>傳票種類</th><th>摘要</th><th class="r">借方合計</th><th class="r">貸方合計</th><th>帳款筆數</th><th>狀態</th><th>內容</th>
+        </tr></thead><tbody>${rows.map((v) => `<tr>
+          <td><b>${esc(v.voucher_no)}</b></td><td>${rocCompact(v.vdate)}</td><td><span class="vkind ${esc(v.vtype)}">${esc(v.vkind)}</span></td>
+          <td>${esc(v.summary)}</td><td class="r">${fmt(v.total_dr)}</td><td class="r">${fmt(v.total_cr)}</td>
+          <td class="center">${esc(v.doc_count)}</td><td>${esc(v.status)}</td>
+          <td><button type="button" data-vno="${esc(v.voucher_no)}">內容</button></td></tr>`).join('')}</tbody></table>` : '';
+    } catch (e) { vNote(e.message, true); }
+  }
+
+  async function openVoucherDetail(no) {
+    const v = await api('/api/vouchers?no=' + encodeURIComponent(no));
+    v.lines = v.lines.map((l) => ({ ...l, dr: Number(l.dr), cr: Number(l.cr) }));
+    $('vdTitle').textContent = `傳票內容　${v.voucher_no}`;
+    $('vdBody').innerHTML = voucherCard(v, false);
+    $('voucherDetail').classList.remove('hidden');
   }
 
   init().catch((e) => msg('初始化失敗：' + e.message, false));

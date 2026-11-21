@@ -181,6 +181,12 @@ npm test
 | `policy_no_seq` | 保單號碼每日流水號，依字首分開編（PF 住火、CC 強制車險、AC 任意車險；字首 + 民國年月日 + 4 碼，例 PF11511160001、CC11511180001） |
 | `policy_seq` | 舊版住火流水號（已轉入 policy_no_seq 的 PF，保留不刪） |
 | `ext_policy_issue` | 外部系統出單對照（來源 + 外部單號 + 保單種類 → 保單號碼），重送時回傳原保單號、不重複出單 |
+| `gl_accounts` | 會計科目（範例科目表，可直接在 DB 修改名稱、新增科目） |
+| `gl_account_map` | 共用科目對照：AR 應收保費、BANK 銀行存款、TAX 應付營業稅 |
+| `gl_premium_map` | 保單字軌 → 保費收入科目、營業稅率（PF 5%、CC 0%、AC 5%；新增險種加一筆） |
+| `gl_voucher` | 傳票主檔（V + 民國年月日 + 4 碼；借貸不平衡無法寫入） |
+| `gl_voucher_line` | 傳票明細（科目、借貸金額、保單號碼子帳、摘要） |
+| `gl_voucher_src` | 帳款 → 傳票對照（同一筆帳款同一事件只開一次） |
 | `quotes` | 報價單：方案、狀態1（報價中/已要保/已出單）、狀態2（未繳費/已繳費/已銷帳）、住火/地震/居家保費、試算明細；預留 policy_no / issued_at / paid_at；刪除為軟刪除 |
 | `quote_seq` | 要保號碼每日流水號（H + 民國年月日 + 4 碼） |
 
@@ -202,6 +208,9 @@ npm test
 | GET | `/api/ledger?kw=&ftype=&frcvpay=` | 帳款檔清單 |
 | GET | `/api/ledger?id=` | 帳款檔內容 |
 | POST | `/api/external` | 外部系統出單（汽車險網投），需 header `x-api-key` = 環境變數 `LEDGER_API_KEY`，見下方 |
+| GET | `/api/vouchers?preview=1&from=&to=` | 傳票預覽（不寫入） |
+| POST | `/api/vouchers` | `{action:'create', from, to}` 傳票開立 |
+| GET | `/api/vouchers?from=&to=` / `?no=` | 已開傳票清單／傳票內容 |
 | GET | `/api/init` | 建立／更新資料表＋種子資料（可重複執行） |
 
 ### 出單寫入帳款檔的內容
@@ -236,6 +245,19 @@ npm test
 - 同一 `source + extRef + kind` 重送只回傳原保單號（`existed: true`），不會重複寫入
 - 網投已線上繳費（`paid: true`）→ frcvpay = **P**、dpay = 出單日；其餘欄位同住火出單
 - 未設定 `LEDGER_API_KEY` 時此 API 回 503（關閉）
+
+### 傳票開立（右上「傳票開立」）
+
+選日期區間（民國 7 碼，預設今天）→ **預覽** → **開立傳票**。已開過的帳款不會重開，可放心重複執行。
+
+| 事件 | 依據 | 傳票 | 分錄 |
+|---|---|---|---|
+| 出單立帳 | 出單日 dplyend | 轉帳傳票（每天一張） | 借 應收保費（逐張保單）／貸 保費收入（依字軌彙總）、應付營業稅 |
+| 收費沖銷 | frcvpay = P，繳費日 dpay | 收入傳票（每天一張） | 借 銀行存款（彙總）／貸 應收保費（逐張保單） |
+
+- 營業稅為保費內含：稅額 = 保費 × 稅率 ÷ (1 + 稅率)，逐張四捨五入後彙總
+- 強制汽車責任保險（CC）不列入營業稅銷售額，稅率 0
+- 字軌未設定在 `gl_premium_map` 的帳款不開立，畫面會列出原因
 
 ## 五、修改費率
 

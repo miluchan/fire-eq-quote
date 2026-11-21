@@ -1,0 +1,18 @@
+{
+  "name": "fire-eq-quote",
+  "version": "2.2.0",
+  "description": "住宅火災及地震基本保險 報價系統（Vercel + Neon PostgreSQL）",
+  "private": true,
+  "scripts": {
+    "dev": "node server.js",
+    "db:init": "node scripts/db-init.js",
+    "db:sql": "node src/seed.js",
+    "test": "node --test test/premium.test.js test/voucher.test.js"
+  },
+  "engines": {
+    "node": "22.x"
+  },
+  "dependencies": {
+    "pg": "^8.13.0"
+  }
+}

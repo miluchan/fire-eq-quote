@@ -1,0 +1,337 @@
+/**
+ * API 處理邏輯（Vercel Functions 與本機 server.js 共用）
+ * 每個 handler 收 { method, query, body }，回傳 { status, data }
+ */
+const db = require('./db');
+const P = require('./premium');
+const SCHEMA = require('./schema');
+const { buildSeedSql } = require('./seed');
+const { LEDGER_FIELDS, EXT_KINDS, toIsoDate, buildPolicyLedger, buildExternalLedger } = require('./ledger');
+const crypto = require('crypto');
+
+// 參考資料快取：Serverless 實例存活期間沿用，60 秒後重新讀 DB（改費率後最多 1 分鐘生效）
+let cache = null;
+let cachedAt = 0;
+async function getRef() {
+  if (!cache || Date.now() - cachedAt > 60000) {
+    const raw = await db.loadRefData();
+    cache = { raw, ref: P.buildRef(raw) };
+    cachedAt = Date.now();
+  }
+  return cache;
+}
+
+class HttpError extends Error {
+  constructor(status, message) { super(message); this.status = status; }
+}
+const ok = (data) => ({ status: 200, data });
+const need = (method, allowed) => {
+  if (!allowed.includes(method)) throw new HttpError(405, `不支援 ${method}`);
+};
+
+/** 由前端表單組成計算輸入 */
+function toCalcInput(b) {
+  const months = b.periodStart && b.periodEnd ? P.monthsBetween(b.periodStart, b.periodEnd) : Number(b.periodMonths) || 12;
+  return {
+    zip: b.locationZip,
+    totalFloors: b.totalFloors,
+    areaPing: b.areaPing,
+    structureCode: b.structureCode,
+    roofCode: b.roofCode,
+    gradeCode: b.gradeCode,
+    decorationPerPing: b.decorationPerPing,
+    buildingSumWan: b.buildingSumWan,
+    movableAddWan: b.movableAddWan,
+    planCode: b.planCode || 'HF',
+    propSumWan: b.propSumWan,
+    eqAlready: Boolean(b.eqAlready),
+    coverages: b.coverages || {},
+    periodMonths: months,
+  };
+}
+
+/** 身分證 / 新舊式居留證 / 統一編號 檢核 */
+function validId(v) {
+  v = String(v || '').toUpperCase();
+  if (/^\d{8}$/.test(v)) {
+    const w = [1, 2, 1, 2, 1, 2, 4, 1];
+    let sum = 0;
+    for (let i = 0; i < 8; i++) { const p = Number(v[i]) * w[i]; sum += Math.floor(p / 10) + (p % 10); }
+    return sum % 5 === 0 || (v[6] === '7' && (sum + 1) % 5 === 0);
+  }
+  if (!/^[A-Z][12890A-D]\d{8}$/.test(v)) return false;
+  const letters = 'ABCDEFGHJKLMNPQRSTUVXYWZIO';
+  const code = letters.indexOf(v[0]) + 10;
+  const second = /[A-D]/.test(v[1]) ? (letters.indexOf(v[1]) + 10) % 10 : Number(v[1]);
+  const digits = [Math.floor(code / 10), code % 10, second, ...v.slice(2).split('').map(Number)];
+  const w = [1, 9, 8, 7, 6, 5, 4, 3, 2, 1, 1];
+  return digits.reduce((s2, d, i) => s2 + d * w[i], 0) % 10 === 0;
+}
+
+/** 儲存報價單：只檢查最基本欄位；確認要保：要保書全部必填 */
+function validate(b, action) {
+  const errs = [];
+  if (!b.applicant?.name) errs.push('要保人姓名');
+  if (!b.periodStart || !b.periodEnd) errs.push('保險期間');
+  if (action === 'confirm') {
+    if (!b.insured?.name) errs.push('被保險人姓名');
+    if (!validId(b.insured?.id_no)) errs.push('被保險人身分證統編');
+    if (!validId(b.applicant?.id_no)) errs.push('要保人身分證統編');
+    for (const [who, label] of [['insured', '被保險人'], ['applicant', '要保人']]) {
+      const bd = b[who]?.birthday;
+      if (bd && !/^\d{7}$/.test(bd)) errs.push(`${label}生日格式(CYYMMDD)`);
+    }
+    if (!b.propertyAddr) errs.push('標的物地址');
+    if (!b.mailAddr) errs.push('通訊地址');
+  }
+  return errs;
+}
+
+const handlers = {
+  async health() {
+    return ok({ ok: true, db: db.usingDb() ? 'neon' : 'memory' });
+  },
+
+  async refdata({ method }) {
+    need(method, ['GET']);
+    return ok({ ...(await getRef()).raw, ledgerFields: LEDGER_FIELDS });
+  },
+
+  async suggest({ method, body }) {
+    need(method, ['POST']);
+    const { ref } = await getRef();
+    return ok(P.suggest(ref, toCalcInput(body)));
+  },
+
+  async calc({ method, body }) {
+    need(method, ['POST']);
+    const { ref } = await getRef();
+    return ok(P.calcAny(ref, toCalcInput(body)));
+  },
+
+  async quotes({ method, query, body }) {
+    need(method, ['GET', 'POST', 'DELETE']);
+
+    if (method === 'GET') {
+      if (query.q) { // 載入前期資料
+        const row = await db.findLatest(String(query.q).trim().toUpperCase());
+        if (!row) throw new HttpError(404, '查無前期資料');
+        return ok(row);
+      }
+      if (query.no) {
+        const row = await db.getQuote(String(query.no));
+        if (!row) throw new HttpError(404, '查無此報價單號');
+        return ok(row);
+      }
+      return ok(await db.listQuotes({ kw: query.kw || '', status1: query.status1 || '', status2: query.status2 || '' }));
+    }
+
+    if (method === 'DELETE') {
+      const row = await db.getQuote(String(query.no || ''));
+      if (!row) throw new HttpError(404, '查無此報價單號');
+      if (row.status1 !== '報價中') throw new HttpError(409, `「${row.status1}」的報價單不可刪除`);
+      await db.deleteQuote(row.quote_no);
+      return ok({ ok: true });
+    }
+
+    // POST：action = save（儲存報價單）/ confirm（確認要保）
+    const b = body;
+    const action = b.action === 'confirm' ? 'confirm' : 'save';
+    const existing = b.quoteNo ? await db.getQuote(b.quoteNo) : null;
+    if (b.quoteNo && !existing) throw new HttpError(404, '查無此報價單號（可能已刪除）');
+    if (existing && existing.status1 !== '報價中') {
+      throw new HttpError(409, `此報價單狀態為「${existing.status1}」，不可修改`);
+    }
+    const errs = validate(b, action);
+    if (errs.length) throw new HttpError(400, `請確認：${errs.join('、')}`);
+
+    const { ref } = await getRef();
+    const input = toCalcInput(b);
+    const c = P.calcAny(ref, input); // 伺服器端重算，不信任前端金額
+    const isFire = c.kind === 'FIRE';
+    const saved = await db.saveQuote({
+      quote_no: existing?.quote_no || null,
+      prev_quote_no: b.prevQuoteNo,
+      plan_code: c.planCode,
+      status1: action === 'confirm' ? '已要保' : '報價中',
+      status2: existing?.status2 || '未繳費',
+      confirmed_at: action === 'confirm' ? new Date().toISOString() : null,
+      location_zip: b.locationZip,
+      total_floors: b.totalFloors || null,
+      area_ping: b.areaPing || null,
+      build_year: b.buildYear || null,
+      structure_code: b.structureCode,
+      roof_code: b.roofCode,
+      grade_code: b.gradeCode,
+      decoration_per_ping: isFire ? b.decorationPerPing || 0 : 0,
+      building_sum: isFire ? c.buildingSum : 0,
+      movable_auto_sum: isFire ? c.movableAutoSum : 0,
+      movable_add_sum: isFire ? c.movableAddSum : 0,
+      prop_sum: isFire ? 0 : c.propSum,
+      eq_already: isFire ? false : c.eqAlready,
+      coverages: isFire ? null : c.selections,
+      lines: c.lines,
+      eq_sum: c.eqSum,
+      fire_premium: c.firePremium,
+      eq_premium: c.eqPremium,
+      home_premium: c.homePremium,
+      total_premium: c.totalPremium,
+      calc_detail: c.detail,
+      insured: { ...b.insured, id_no: String(b.insured?.id_no || '').toUpperCase() },
+      applicant: { ...b.applicant, id_no: String(b.applicant?.id_no || '').toUpperCase() },
+      property_zip: b.propertyZip,
+      property_addr: b.propertyAddr,
+      mail_zip: b.mailZip,
+      mail_addr: b.mailAddr,
+      period_start: b.periodStart,
+      period_end: b.periodEnd,
+      period_months: input.periodMonths,
+      mortgagee_bank: b.mortgageeBank,
+      mortgagee_name: b.mortgageeName,
+    });
+    return ok({ quote: saved, calc: c });
+  },
+
+  /** 確認出單：已要保 → 寫入 ao_plyedr_prem、報價單改已出單 */
+  async issue({ method, body }) {
+    need(method, ['POST']);
+    if (!body.quoteNo) throw new HttpError(400, '請先儲存並確認要保');
+    const { ref } = await getRef();
+    const r = await db.issuePolicy(String(body.quoteNo), (q, policyNo, day) => buildPolicyLedger(q, policyNo, day, ref.zips));
+    return ok(r);
+  },
+
+  /**
+   * 外部系統出單 POST /api/external（伺服器對伺服器，需 x-api-key = 環境變數 LEDGER_API_KEY）
+   * body: { source, extRef, insuredName, mailAddr?, paid, items: [{ kind:'CC'|'AC', premium, start, end }] }
+   */
+  async external({ method, body, headers }) {
+    need(method, ['POST']);
+    const expected = process.env.LEDGER_API_KEY || '';
+    if (!expected) throw new HttpError(503, '伺服器未設定 LEDGER_API_KEY，暫停受理外部出單');
+    const given = Buffer.from(String(headers['x-api-key'] || ''));
+    const want = Buffer.from(expected);
+    const keyOk = given.length === want.length && crypto.timingSafeEqual(given, want);
+    if (!keyOk) throw new HttpError(401, 'API 金鑰錯誤');
+
+    const source = String(body.source || '').trim();
+    const extRef = String(body.extRef || '').trim();
+    if (!/^[a-z0-9-]{2,20}$/.test(source)) throw new HttpError(400, 'source 格式錯誤');
+    if (!extRef || extRef.length > 40) throw new HttpError(400, '缺少來源單號 extRef');
+    const items = Array.isArray(body.items) ? body.items : [];
+    if (!items.length) throw new HttpError(400, '沒有要出單的保單');
+    const kinds = new Set();
+    for (const it of items) {
+      if (!EXT_KINDS[it.kind]) throw new HttpError(400, `不支援的保單字軌：${it.kind}`);
+      if (kinds.has(it.kind)) throw new HttpError(400, `保單字軌重複：${it.kind}`);
+      kinds.add(it.kind);
+      if (!(Number(it.premium) > 0)) throw new HttpError(400, `${it.kind} 保費需大於 0`);
+      if (!toIsoDate(it.start) || !toIsoDate(it.end)) throw new HttpError(400, `${it.kind} 保險期間格式錯誤`);
+    }
+    const info = { insuredName: body.insuredName, mailAddr: body.mailAddr, paid: Boolean(body.paid) };
+    const r = await db.issueExternal({ source, extRef, items },
+      (it, policyNo, day) => buildExternalLedger(it, policyNo, day, info));
+    return ok({ ok: true, ...r });
+  },
+
+  /** 帳款檔查詢：?id= 內容；否則清單（kw / frcvpay / ftype） */
+  async ledger({ method, query }) {
+    need(method, ['GET']);
+    if (query.id) {
+      const row = await db.getLedger(query.id);
+      if (!row) throw new HttpError(404, '查無此帳款資料');
+      return ok(row);
+    }
+    return ok(await db.listLedger({ kw: query.kw || '', frcvpay: query.frcvpay || '', ftype: query.ftype || '' }));
+  },
+
+  /**
+   * 傳票 /api/vouchers
+   * GET  ?no=傳票號碼            傳票內容（含明細）
+   * GET  ?from=&to=              傳票清單（傳票日期區間）
+   * GET  ?preview=1&from=&to=    預覽：區間內尚未開立的帳款會產生哪些傳票（不寫入）
+   * GET  ?accounts=1             會計科目與對照設定
+   * POST { action:'create', from, to }  傳票開立
+   * 日期可用民國 7 碼（1151121）或 YYYY-MM-DD；出單立帳依出單日、收費沖銷依繳費日
+   */
+  async vouchers({ method, query, body }) {
+    need(method, ['GET', 'POST']);
+    const range = (src) => {
+      const from = toIsoDate(src.from);
+      const to = toIsoDate(src.to || src.from);
+      if (!from || !to) throw new HttpError(400, '請輸入正確的日期區間（民國年月日 7 碼）');
+      if (from > to) throw new HttpError(400, '起日不可大於迄日');
+      if ((new Date(to) - new Date(from)) / 86400000 > 92) throw new HttpError(400, '日期區間最多 3 個月');
+      return [from, to];
+    };
+    if (method === 'POST') {
+      if (body.action !== 'create') throw new HttpError(400, '不支援的動作');
+      const [from, to] = range(body);
+      const r = await db.createVouchers(from, to);
+      return ok({ ok: true, from, to, created: r.vouchers.map(({ ledgerIds, ...v }) => ({ ...v, doc_count: ledgerIds.length })), skipped: r.skipped });
+    }
+    if (query.no) {
+      const v = await db.getVoucher(String(query.no));
+      if (!v) throw new HttpError(404, '查無此傳票');
+      return ok(v);
+    }
+    if (query.accounts) return ok(await db.loadGl());
+    const [from, to] = range(query);
+    if (query.preview) {
+      const r = await db.previewVouchers(from, to);
+      return ok({ from, to, vouchers: r.vouchers.map(({ ledgerIds, ...v }) => ({ ...v, doc_count: ledgerIds.length })), skipped: r.skipped });
+    }
+    return ok(await db.listVouchers(from, to));
+  },
+
+  /**
+   * 建立／更新資料表＋寫入種子資料：瀏覽器開 /api/init
+   * 可重複執行、不會刪除資料；費率類資料若已存在不覆蓋（保留在 DB 調整過的費率）
+   * 每次部署新版（資料表有變動）後執行一次即可
+   */
+  async init() {
+    if (!db.usingDb()) throw new HttpError(400, '尚未設定 DATABASE_URL：請先在 Neon 資料庫頁按 Connect to Project 連到此 Vercel 專案，並 Redeploy');
+    await db.exec(SCHEMA);
+    await db.exec(buildSeedSql());
+    cache = null;
+    const r = await db.exec(`SELECT
+      (SELECT count(*) FROM zip_codes)::int AS zips,
+      (SELECT count(*) FROM plans)::int AS plans,
+      (SELECT count(*) FROM coverages)::int AS coverages,
+      (SELECT count(*) FROM coverage_premiums)::int AS coverage_premiums,
+      (SELECT count(*) FROM quotes WHERE deleted_at IS NULL)::int AS quotes,
+      (SELECT count(*) FROM ao_plyedr_prem)::int AS ao_plyedr_prem,
+      (SELECT count(*) FROM gl_voucher)::int AS gl_voucher`);
+    return ok({ ok: true, message: '✔ 資料表建立／更新完成、種子資料寫入完成', counts: r.rows[0] });
+  },
+};
+
+/** 統一執行並轉成 HTTP 回應 */
+async function run(name, { method, query = {}, body = {}, headers = {} }) {
+  try {
+    const h = handlers[name];
+    if (!h) throw new HttpError(404, 'API not found');
+    return await h({ method, query, body: body || {}, headers: headers || {} });
+  } catch (e) {
+    if (e.status) return { status: e.status, data: { error: e.message } };
+    if (e.code) { // PostgreSQL 錯誤
+      console.error(e);
+      return { status: 500, data: { error: `資料庫錯誤：${e.message}` } };
+    }
+    // 計算引擎的輸入檢核錯誤（如「請輸入總樓層數」）
+    return { status: 400, data: { error: e.message || '系統錯誤' } };
+  }
+}
+
+/** Vercel Function 包裝 */
+function vercel(name) {
+  return async (req, res) => {
+    let body = req.body;
+    if (typeof body === 'string') { try { body = JSON.parse(body); } catch (_) { body = {}; } }
+    const r = await run(name, { method: req.method, query: req.query || {}, body, headers: req.headers || {} });
+    res.setHeader('Cache-Control', 'no-store');
+    res.status(r.status).json(r.data);
+  };
+}
+
+module.exports = { run, vercel };

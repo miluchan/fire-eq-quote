@@ -1,0 +1,514 @@
+/**
+ * 資料存取層
+ * - 有 DATABASE_URL（Vercel × Neon 整合會自動注入）：連 Neon PostgreSQL
+ * - 沒有：記憶體模式（用 refdata.js，資料不會保存），只供本機先看畫面
+ */
+const R = require('./refdata');
+
+let pool = null;
+const mem = { quotes: new Map(), seq: new Map(), ledger: [], policySeq: new Map() };
+const L = require('./ledger');
+
+function dbUrl() {
+  return process.env.DATABASE_URL || process.env.POSTGRES_URL || '';
+}
+
+function usingDb() {
+  return Boolean(dbUrl());
+}
+
+function getPool() {
+  if (!pool) {
+    const { Pool, types } = require('pg');
+    types.setTypeParser(1082, (v) => v); // DATE 以 'YYYY-MM-DD' 字串回傳，避免時區位移
+    const url = dbUrl();
+    pool = new Pool({
+      connectionString: url,
+      ssl: /sslmode=/.test(url) ? undefined : { rejectUnauthorized: true },
+      max: 3, // Serverless：每個函式實例只開少量連線（走 Neon pooler）
+      idleTimeoutMillis: 10000,
+    });
+  }
+  return pool;
+}
+
+/** 直接執行（可多句 SQL，初始化用） */
+async function exec(sql) {
+  return getPool().query(sql);
+}
+
+async function q(sql, params) {
+  return (await getPool().query(sql, params)).rows;
+}
+
+/** 載入所有參考資料（下拉選單 + 計算用費率表） */
+async function loadRefData() {
+  if (!usingDb()) {
+    return {
+      zips: R.ZIPS,
+      costs: R.BUILDING_COSTS.flatMap(([min, max, ...p]) =>
+        p.map((v, i) => ({ version: R.BUILDING_COST_VERSION, floor_min: min, floor_max: max, cost_region: i + 1, price_per_ping: v }))),
+      structures: R.STRUCTURES,
+      roofs: R.ROOFS,
+      grades: R.GRADES,
+      shortRates: Object.entries(R.SHORT_RATES).flatMap(([product, l]) => l.map(([months, pct]) => ({ product, months, pct }))),
+      settings: Object.fromEntries(Object.entries(R.SETTINGS).map(([k, v]) => [k, String(v)])),
+      banks: R.BANKS.map(([code, name]) => ({ code, name })),
+      nationalities: R.NATIONALITIES.map(([code, name]) => ({ code, name })),
+      plans: R.PLANS,
+      coverages: R.COVERAGES,
+      coverageOptions: R.COVERAGE_OPTIONS,
+      coveragePremiums: R.COVERAGE_PREMIUMS,
+      coverageRates: R.COVERAGE_RATE_ROWS,
+      status1: R.STATUS1,
+      status2: R.STATUS2,
+    };
+  }
+  const [zips, costs, structures, roofs, grades, shortRates, settings, banks, nationalities,
+    plans, coverages, coverageOptions, coveragePremiums, coverageRates] = await Promise.all([
+    q('SELECT zip, county, district, cost_region FROM zip_codes ORDER BY zip'),
+    q(`SELECT version, floor_min, floor_max, cost_region, price_per_ping FROM building_costs
+       WHERE version = (SELECT max(version) FROM building_costs) ORDER BY floor_min, cost_region`),
+    q('SELECT code, name, cost_factor::float, flat_price, default_grade FROM structure_codes ORDER BY code'),
+    q('SELECT code, name, grade_shift FROM roof_codes ORDER BY code'),
+    q('SELECT code, name, fire_rate::float FROM building_grades ORDER BY code'),
+    q('SELECT product, months, pct::float FROM short_rates ORDER BY product, months'),
+    q('SELECT key, value FROM settings'),
+    q('SELECT code, name FROM banks ORDER BY code'),
+    q('SELECT code, name FROM nationalities ORDER BY CASE WHEN code = \'158\' THEN 0 ELSE 1 END, code'),
+    q('SELECT code, name, kind, prop_label, prop_base_fee::float, prop_rate::float, sort FROM plans WHERE active ORDER BY sort'),
+    q('SELECT code, name, sum_label, calc, required, default_on, sort FROM coverages WHERE active ORDER BY sort'),
+    q('SELECT coverage_code, value, is_default, sort FROM coverage_options ORDER BY coverage_code, sort'),
+    q('SELECT plan_code, coverage_code, value, premium::float, estimated FROM coverage_premiums'),
+    q('SELECT plan_code, coverage_code, rate::float FROM coverage_rates'),
+  ]);
+  return {
+    zips, costs, structures, roofs, grades, shortRates,
+    settings: Object.fromEntries(settings.map((s) => [s.key, s.value])),
+    banks, nationalities,
+    plans, coverages, coverageOptions, coveragePremiums, coverageRates,
+    status1: R.STATUS1,
+    status2: R.STATUS2,
+  };
+}
+
+/** 產生要保號碼：H + 民國年月日(7) + 流水號(4)，例 H11511130001 */
+async function nextQuoteNo() {
+  const now = new Date(Date.now() + 8 * 3600 * 1000); // 台灣時間
+  const day = now.toISOString().slice(0, 10);
+  const roc = `${now.getUTCFullYear() - 1911}${day.slice(5, 7)}${day.slice(8, 10)}`;
+  let n;
+  if (!usingDb()) {
+    n = (mem.seq.get(day) || 0) + 1;
+    mem.seq.set(day, n);
+  } else {
+    const rows = await q(
+      `INSERT INTO quote_seq (day, last) VALUES ($1, 1)
+       ON CONFLICT (day) DO UPDATE SET last = quote_seq.last + 1 RETURNING last`, [day]);
+    n = rows[0].last;
+  }
+  return `H${roc}${String(n).padStart(4, '0')}`;
+}
+
+const COLS = [
+  'quote_no', 'prev_quote_no', 'plan_code', 'status1', 'status2', 'location_zip', 'total_floors', 'area_ping', 'build_year',
+  'structure_code', 'roof_code', 'grade_code', 'decoration_per_ping',
+  'building_sum', 'movable_auto_sum', 'movable_add_sum', 'eq_sum',
+  'prop_sum', 'eq_already', 'coverages', 'lines', 'confirmed_at',
+  'fire_premium', 'eq_premium', 'home_premium', 'total_premium', 'calc_detail',
+  'insured', 'applicant', 'property_zip', 'property_addr', 'mail_zip', 'mail_addr',
+  'period_start', 'period_end', 'period_months', 'mortgagee_bank', 'mortgagee_name',
+];
+
+async function saveQuote(rec) {
+  if (!rec.quote_no) rec.quote_no = await nextQuoteNo();
+  if (!usingDb()) {
+    const prev = mem.quotes.get(rec.quote_no);
+    const row = { ...prev, ...rec, updated_at: new Date().toISOString(), created_at: prev?.created_at || new Date().toISOString() };
+    mem.quotes.set(rec.quote_no, row);
+    return row;
+  }
+  const vals = COLS.map((c) => {
+    const v = rec[c];
+    if (v === undefined || v === '') return null;
+    return typeof v === 'object' && v !== null && !(v instanceof Date) ? JSON.stringify(v) : v;
+  });
+  const placeholders = COLS.map((_, i) => `$${i + 1}`).join(', ');
+  const updates = COLS.filter((c) => c !== 'quote_no').map((c) => `${c} = EXCLUDED.${c}`).join(', ');
+  const rows = await q(
+    `INSERT INTO quotes (${COLS.join(', ')}) VALUES (${placeholders})
+     ON CONFLICT (quote_no) DO UPDATE SET ${updates}, updated_at = now()
+     RETURNING *`, vals);
+  return rows[0];
+}
+
+async function getQuote(quoteNo) {
+  if (!usingDb()) {
+    const r = mem.quotes.get(quoteNo);
+    return r && !r.deleted_at ? r : null;
+  }
+  const rows = await q('SELECT * FROM quotes WHERE quote_no = $1 AND deleted_at IS NULL', [quoteNo]);
+  return rows[0] || null;
+}
+
+/** 依報價單號或被保險人身分證/統編，找最近一筆（載入前期資料用） */
+async function findLatest(keyword) {
+  if (!usingDb()) {
+    const list = [...mem.quotes.values()].filter((x) => !x.deleted_at && (x.quote_no === keyword || x.insured?.id_no === keyword));
+    return list.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] || null;
+  }
+  const rows = await q(
+    `SELECT * FROM quotes WHERE deleted_at IS NULL AND (quote_no = $1 OR insured->>'id_no' = $1)
+     ORDER BY created_at DESC LIMIT 1`, [keyword]);
+  return rows[0] || null;
+}
+
+/** 查詢一覽表：關鍵字（報價單號 / 要保人姓名 / 要保人或被保險人 ID）＋狀態篩選 */
+async function listQuotes({ kw = '', status1 = '', status2 = '', limit = 200 } = {}) {
+  const k = String(kw).trim();
+  if (!usingDb()) {
+    const K = k.toUpperCase();
+    return [...mem.quotes.values()]
+      .filter((x) => !x.deleted_at)
+      .filter((x) => !k || x.quote_no.includes(K) || (x.applicant?.name || '').includes(k)
+        || (x.applicant?.id_no || '').toUpperCase() === K || (x.insured?.id_no || '').toUpperCase() === K)
+      .filter((x) => !status1 || x.status1 === status1)
+      .filter((x) => !status2 || x.status2 === status2)
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+      .slice(0, limit)
+      .map((x) => ({
+        quote_no: x.quote_no, plan_code: x.plan_code, applicant_name: x.applicant?.name || '',
+        period_start: x.period_start, period_end: x.period_end,
+        fire_premium: x.fire_premium, eq_premium: x.eq_premium, home_premium: x.home_premium,
+        total_premium: x.total_premium, status1: x.status1, status2: x.status2, created_at: x.created_at,
+      }));
+  }
+  return q(
+    `SELECT quote_no, plan_code, applicant->>'name' AS applicant_name,
+            to_char(period_start, 'YYYY-MM-DD') AS period_start, to_char(period_end, 'YYYY-MM-DD') AS period_end,
+            fire_premium, eq_premium, home_premium, total_premium, status1, status2, created_at
+       FROM quotes
+      WHERE deleted_at IS NULL
+        AND ($1 = '' OR quote_no ILIKE '%' || $1 || '%' OR applicant->>'name' ILIKE '%' || $1 || '%'
+             OR upper(applicant->>'id_no') = upper($1) OR upper(insured->>'id_no') = upper($1))
+        AND ($2 = '' OR status1 = $2)
+        AND ($3 = '' OR status2 = $3)
+      ORDER BY created_at DESC
+      LIMIT $4`, [k, status1, status2, limit]);
+}
+
+/** 刪除（軟刪除，資料保留） */
+async function deleteQuote(quoteNo) {
+  if (!usingDb()) {
+    const r = mem.quotes.get(quoteNo);
+    if (r) r.deleted_at = new Date().toISOString();
+    return Boolean(r);
+  }
+  const rows = await q('UPDATE quotes SET deleted_at = now() WHERE quote_no = $1 AND deleted_at IS NULL RETURNING quote_no', [quoteNo]);
+  return rows.length > 0;
+}
+
+class DbError extends Error {
+  constructor(status, message) { super(message); this.status = status; }
+}
+
+/** 台灣今天 'YYYY-MM-DD' */
+function taipeiToday() {
+  return new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
+/**
+ * 確認出單（單一交易）：
+ * 鎖定報價單 → 檢查「已要保」→ 取保單號 → 寫入 ao_plyedr_prem → 報價單改「已出單」
+ * build(q, policyNo, day) 回傳要寫入帳款檔的欄位
+ */
+async function issuePolicy(quoteNo, build) {
+  if (!usingDb()) {
+    const q = mem.quotes.get(quoteNo);
+    if (!q || q.deleted_at) throw new DbError(404, '查無此報價單號');
+    if (q.status1 !== '已要保') throw new DbError(409, `報價單狀態為「${q.status1}」，需「已要保」才能出單`);
+    const day = taipeiToday();
+    const policyNo = L.policyNoOf(day, memNextSeq('PF', day), 'PF');
+    const row = { id: mem.ledger.length + 1, created_at: new Date().toISOString() };
+    for (const f of L.LEDGER_FIELDS) row[f.name] = f.type === 'DATE' ? null : /^(DECIMAL|INTEGER|SMALLINT)/.test(f.type) ? 0 : '';
+    Object.assign(row, build(q, policyNo, day));
+    row.mprem = Number(row.mprem).toFixed(4);
+    mem.ledger.push(row);
+    Object.assign(q, { status1: '已出單', policy_no: policyNo, issued_at: new Date().toISOString() });
+    return { policyNo, ledger: row, quote: q };
+  }
+
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: [q] } = await client.query(
+      'SELECT * FROM quotes WHERE quote_no = $1 AND deleted_at IS NULL FOR UPDATE', [quoteNo]);
+    if (!q) throw new DbError(404, '查無此報價單號');
+    if (q.status1 !== '已要保') throw new DbError(409, `報價單狀態為「${q.status1}」，需「已要保」才能出單`);
+    if (q.policy_no) throw new DbError(409, `此報價單已出單（保單號碼 ${q.policy_no}）`);
+
+    const { rows: [d] } = await client.query(`SELECT to_char((now() AT TIME ZONE 'Asia/Taipei')::date, 'YYYY-MM-DD') AS day`);
+    const policyNo = await nextPolicyNo(client, 'PF', d.day);
+
+    const rec = build(q, policyNo, d.day);
+    const cols = Object.keys(rec);
+    const { rows: [ledger] } = await client.query(
+      `INSERT INTO ao_plyedr_prem (${cols.join(', ')}) VALUES (${cols.map((_, i) => `$${i + 1}`).join(', ')}) RETURNING *`,
+      cols.map((c) => rec[c]));
+    const { rows: [quote] } = await client.query(
+      `UPDATE quotes SET status1 = '已出單', policy_no = $2, issued_at = now(), updated_at = now()
+        WHERE quote_no = $1 RETURNING *`, [quoteNo, policyNo]);
+    await client.query('COMMIT');
+    return { policyNo, ledger, quote };
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+function memNextSeq(prefix, day) {
+  const k = `${prefix}|${day}`;
+  const n = (mem.policySeq.get(k) || 0) + 1;
+  mem.policySeq.set(k, n);
+  return n;
+}
+
+/** 取下一個保單號碼（同一交易內呼叫；依字軌＋日期流水） */
+async function nextPolicyNo(client, prefix, day) {
+  const { rows: [s] } = await client.query(
+    `INSERT INTO policy_no_seq (prefix, day, last) VALUES ($1, $2, 1)
+     ON CONFLICT (prefix, day) DO UPDATE SET last = policy_no_seq.last + 1 RETURNING last`, [prefix, day]);
+  return L.policyNoOf(day, s.last, prefix);
+}
+
+/**
+ * 外部系統出單（例：汽車險網投）：單一交易
+ * 同一 source + extRef + 保單字軌只會出一次；重送時直接回傳原保單號（冪等）
+ * build(item, policyNo, day) 回傳要寫入帳款檔的欄位
+ */
+async function issueExternal({ source, extRef, items }, build) {
+  if (!usingDb()) {
+    mem.extIssue = mem.extIssue || new Map();
+    const day = taipeiToday();
+    const policies = items.map((it) => {
+      const key = `${source}|${extRef}|${it.kind}`;
+      if (mem.extIssue.has(key)) return { kind: it.kind, policyNo: mem.extIssue.get(key), existed: true };
+      const policyNo = L.policyNoOf(day, memNextSeq(it.kind, day), it.kind);
+      const row = { id: mem.ledger.length + 1, created_at: new Date().toISOString() };
+      for (const f of L.LEDGER_FIELDS) row[f.name] = f.type === 'DATE' ? null : /^(DECIMAL|INTEGER|SMALLINT)/.test(f.type) ? 0 : '';
+      Object.assign(row, build(it, policyNo, day));
+      mem.ledger.push(row);
+      mem.extIssue.set(key, policyNo);
+      return { kind: it.kind, policyNo, existed: false };
+    });
+    return { day, policies };
+  }
+
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    // 同一張來源單據序列化，避免兩個請求同時出單
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`${source}|${extRef}`]);
+    const { rows: [d] } = await client.query(`SELECT to_char((now() AT TIME ZONE 'Asia/Taipei')::date, 'YYYY-MM-DD') AS day`);
+    const policies = [];
+    for (const it of items) {
+      const { rows: [ex] } = await client.query(
+        'SELECT ipolicy1 FROM ext_policy_issue WHERE source = $1 AND ext_ref = $2 AND kind = $3', [source, extRef, it.kind]);
+      if (ex) { policies.push({ kind: it.kind, policyNo: ex.ipolicy1, existed: true }); continue; }
+      const policyNo = await nextPolicyNo(client, it.kind, d.day);
+      const rec = build(it, policyNo, d.day);
+      const cols = Object.keys(rec);
+      await client.query(
+        `INSERT INTO ao_plyedr_prem (${cols.join(', ')}) VALUES (${cols.map((_, i) => `$${i + 1}`).join(', ')})`,
+        cols.map((c) => rec[c]));
+      await client.query(
+        'INSERT INTO ext_policy_issue (source, ext_ref, kind, ipolicy1) VALUES ($1, $2, $3, $4)',
+        [source, extRef, it.kind, policyNo]);
+      policies.push({ kind: it.kind, policyNo, existed: false });
+    }
+    await client.query('COMMIT');
+    return { day: d.day, policies };
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+// ═════════ 傳票 ═════════
+const V = require('./voucher');
+
+/** 會計科目、科目對照、保單字軌 → 收入科目／稅率 */
+async function loadGl(client) {
+  if (!usingDb()) return V.DEFAULT_GL;
+  const run = (sql) => (client ? client.query(sql) : getPool().query(sql)).then((r) => r.rows);
+  const [accounts, maps, prem] = await Promise.all([
+    run('SELECT code, name, category, dc, active FROM gl_accounts ORDER BY code'),
+    run('SELECT map_key, account_code FROM gl_account_map'),
+    run('SELECT prefix, label, revenue_code, tax_rate FROM gl_premium_map'),
+  ]);
+  const map = Object.fromEntries(maps.map((m) => [m.map_key, m.account_code]));
+  for (const k of ['AR', 'BANK', 'TAX']) if (!map[k]) throw new DbError(500, `gl_account_map 缺少 ${k} 科目設定`);
+  const premium = Object.fromEntries(prem.map((p) => [p.prefix, { label: p.label, revenue_code: p.revenue_code, tax_rate: Number(p.tax_rate) }]));
+  return { accounts, map, premium };
+}
+
+/** 區間內尚未開立傳票的帳款（只取保單 ftype=P） */
+async function pendingForVoucher(client, from, to) {
+  if (!usingDb()) {
+    const done = mem.voucherSrc || new Set();
+    const inRange = (d) => d && d >= from && d <= to;
+    return {
+      issueRows: mem.ledger.filter((r) => r.ftype === 'P' && inRange(r.dplyend) && !done.has(`${r.id}|ISSUE`)),
+      receiptRows: mem.ledger.filter((r) => r.ftype === 'P' && r.frcvpay === 'P' && inRange(r.dpay) && !done.has(`${r.id}|RECEIPT`)),
+    };
+  }
+  const cols = 'a.id, a.ipolicy1, a.nassured, a.insure_type, a.mprem, a.mprem_nt, a.dplyend, a.dpay, a.frcvpay';
+  const { rows: issueRows } = await client.query(
+    `SELECT ${cols} FROM ao_plyedr_prem a
+      WHERE a.ftype = 'P' AND a.dplyend BETWEEN $1 AND $2
+        AND NOT EXISTS (SELECT 1 FROM gl_voucher_src s WHERE s.ledger_id = a.id AND s.vtype = 'ISSUE')
+      ORDER BY a.dplyend, a.ipolicy1`, [from, to]);
+  const { rows: receiptRows } = await client.query(
+    `SELECT ${cols} FROM ao_plyedr_prem a
+      WHERE a.ftype = 'P' AND a.frcvpay = 'P' AND a.dpay BETWEEN $1 AND $2
+        AND NOT EXISTS (SELECT 1 FROM gl_voucher_src s WHERE s.ledger_id = a.id AND s.vtype = 'RECEIPT')
+      ORDER BY a.dpay, a.ipolicy1`, [from, to]);
+  return { issueRows, receiptRows };
+}
+
+/** 傳票預覽（不寫入） */
+async function previewVouchers(from, to) {
+  if (!usingDb()) {
+    const p = await pendingForVoucher(null, from, to);
+    return V.buildVouchers(p.issueRows, p.receiptRows, V.DEFAULT_GL);
+  }
+  const client = await getPool().connect();
+  try {
+    const gl = await loadGl(client);
+    const p = await pendingForVoucher(client, from, to);
+    return V.buildVouchers(p.issueRows, p.receiptRows, gl);
+  } finally {
+    client.release();
+  }
+}
+
+/** 傳票開立（單一交易；同時只允許一個批次執行，已開立的帳款不會重開） */
+async function createVouchers(from, to) {
+  if (!usingDb()) {
+    mem.vouchers = mem.vouchers || [];
+    mem.voucherSrc = mem.voucherSrc || new Set();
+    const p = await pendingForVoucher(null, from, to);
+    const r = V.buildVouchers(p.issueRows, p.receiptRows, V.DEFAULT_GL);
+    for (const v of r.vouchers) {
+      v.voucher_no = L.policyNoOf(v.vdate, memNextSeq('V', v.vdate), 'V');
+      mem.vouchers.push({ ...v, created_at: new Date().toISOString(), status: '已開立' });
+      v.ledgerIds.forEach((id) => mem.voucherSrc.add(`${id}|${v.vtype}`));
+    }
+    return r;
+  }
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('gl_voucher_batch'))");
+    const gl = await loadGl(client);
+    const p = await pendingForVoucher(client, from, to);
+    const r = V.buildVouchers(p.issueRows, p.receiptRows, gl);
+    for (const v of r.vouchers) {
+      v.voucher_no = await nextPolicyNo(client, 'V', v.vdate);
+      await client.query(
+        `INSERT INTO gl_voucher (voucher_no, vdate, vtype, vkind, summary, total_dr, total_cr, doc_count)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [v.voucher_no, v.vdate, v.vtype, v.vkind, v.summary, v.totalDr, v.totalCr, v.ledgerIds.length]);
+      for (const l of v.lines) {
+        await client.query(
+          `INSERT INTO gl_voucher_line (voucher_no, line_no, account_code, dr, cr, ipolicy1, memo)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [v.voucher_no, l.line_no, l.account_code, l.dr, l.cr, l.ipolicy1, l.memo.slice(0, 100)]);
+      }
+      await client.query(
+        `INSERT INTO gl_voucher_src (ledger_id, vtype, voucher_no)
+         SELECT unnest($1::bigint[]), $2, $3`, [v.ledgerIds, v.vtype, v.voucher_no]);
+    }
+    await client.query('COMMIT');
+    return r;
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+/** 傳票清單（依傳票日期區間） */
+async function listVouchers(from, to) {
+  if (!usingDb()) {
+    return (mem.vouchers || []).filter((v) => v.vdate >= from && v.vdate <= to)
+      .map((v) => ({ voucher_no: v.voucher_no, vdate: v.vdate, vtype: v.vtype, vkind: v.vkind, summary: v.summary,
+        total_dr: v.totalDr, total_cr: v.totalCr, doc_count: v.ledgerIds.length, status: v.status, created_at: v.created_at }))
+      .sort((a, b) => a.voucher_no.localeCompare(b.voucher_no));
+  }
+  return q(
+    `SELECT voucher_no, vdate, vtype, vkind, summary, total_dr, total_cr, doc_count, status, created_at
+       FROM gl_voucher WHERE vdate BETWEEN $1 AND $2 ORDER BY voucher_no`, [from, to]);
+}
+
+/** 傳票內容（主檔＋明細） */
+async function getVoucher(no) {
+  if (!usingDb()) {
+    const v = (mem.vouchers || []).find((x) => x.voucher_no === no);
+    if (!v) return null;
+    return { voucher_no: v.voucher_no, vdate: v.vdate, vtype: v.vtype, vkind: v.vkind, summary: v.summary,
+      total_dr: v.totalDr, total_cr: v.totalCr, doc_count: v.ledgerIds.length, status: v.status, created_at: v.created_at, lines: v.lines };
+  }
+  const [h] = await q('SELECT * FROM gl_voucher WHERE voucher_no = $1', [no]);
+  if (!h) return null;
+  h.lines = await q(
+    `SELECT l.line_no, l.account_code, a.name AS account_name, l.dr, l.cr, l.ipolicy1, l.memo
+       FROM gl_voucher_line l JOIN gl_accounts a ON a.code = l.account_code
+      WHERE l.voucher_no = $1 ORDER BY l.line_no`, [no]);
+  return h;
+}
+
+/** 帳款檔清單（可依保單號碼/報價單號/要保人、收支註記、類別型態篩選） */
+async function listLedger({ kw = '', frcvpay = '', ftype = '', limit = 200 } = {}) {
+  const k = String(kw).trim();
+  if (!usingDb()) {
+    return mem.ledger
+      .map((r) => {
+        const q = [...mem.quotes.values()].find((x) => x.policy_no === r.ipolicy1);
+        return { ...r, quote_no: q?.quote_no || '', applicant_name: q?.applicant?.name || '' };
+      })
+      .filter((r) => !k || r.ipolicy1.includes(k.toUpperCase()) || r.quote_no.includes(k.toUpperCase()) || r.nassured.includes(k))
+      .filter((r) => !frcvpay || r.frcvpay === frcvpay)
+      .filter((r) => !ftype || r.ftype === ftype)
+      .reverse().slice(0, limit);
+  }
+  return q(
+    `SELECT a.id, a.ipolicy1, a.iendorse, a.dplyend, a.ftype, a.insure_type, a.nassured, a.isub, a.mprem, a.icur,
+            a.dbegin, a.dend, a.fcommit, a.frcvpay,
+            COALESCE(qt.quote_no, '') AS quote_no, COALESCE(qt.applicant->>'name', '') AS applicant_name
+       FROM ao_plyedr_prem a
+       LEFT JOIN quotes qt ON qt.policy_no = a.ipolicy1
+      WHERE ($1 = '' OR a.ipolicy1 ILIKE '%' || $1 || '%' OR qt.quote_no ILIKE '%' || $1 || '%'
+             OR a.nassured ILIKE '%' || $1 || '%')
+        AND ($2 = '' OR a.frcvpay = $2)
+        AND ($3 = '' OR a.ftype = $3)
+      ORDER BY a.id DESC
+      LIMIT $4`, [k, frcvpay, ftype, limit]);
+}
+
+async function getLedger(id) {
+  if (!usingDb()) return mem.ledger.find((r) => String(r.id) === String(id)) || null;
+  const rows = await q('SELECT * FROM ao_plyedr_prem WHERE id = $1', [Number(id) || 0]);
+  return rows[0] || null;
+}
+
+module.exports = {
+  exec, usingDb, loadRefData, saveQuote, getQuote, findLatest, listQuotes, deleteQuote, nextQuoteNo,
+  issuePolicy, issueExternal, listLedger, getLedger,
+  loadGl, previewVouchers, createVouchers, listVouchers, getVoucher,
+};
